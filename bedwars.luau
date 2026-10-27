@@ -157,6 +157,8 @@ local function dumpRemote(fn)
 	end
 end
 
+local hookRankRemotes
+
 local function hookKnit()
 	local started = os.clock()
 	while os.clock() - started < 20 do
@@ -233,6 +235,9 @@ local function hookKnit()
 					hookSwing()
 				end
 			end)
+			if hookRankRemotes then
+				pcall(hookRankRemotes)
+			end
 			return BW.ready
 		end
 		task.wait(0.25)
@@ -1597,230 +1602,316 @@ local RANK_LIST = {
 	"Nightmare",
 }
 
-local RANK_COLOR = {
-	Bronze = Color3.fromRGB(205, 127, 50),
-	Silver = Color3.fromRGB(192, 192, 208),
-	Gold = Color3.fromRGB(255, 200, 50),
-	Platinum = Color3.fromRGB(70, 220, 200),
-	Diamond = Color3.fromRGB(80, 180, 255),
-	Emerald = Color3.fromRGB(50, 220, 120),
-	Nightmare = Color3.fromRGB(160, 70, 255),
+local RANK_IMAGE = {
+	Bronze = "rbxassetid://7904293227",
+	Silver = "rbxassetid://7904292748",
+	Gold = "rbxassetid://7904293006",
+	Platinum = "rbxassetid://7904292835",
+	Diamond = "rbxassetid://7904293114",
+	Emerald = "rbxassetid://12599231807",
+	Nightmare = "rbxassetid://107117112416767",
 }
 
-local function rankNeed(rank)
-	if rank == "Emerald" or rank == "Nightmare" then
-		return 100
-	end
-	return 100
+local function tierOf(rank)
+	return (string.match(tostring(rank or ""), "^(%a+)") or "Platinum")
 end
 
-local function rankTier(rank)
-	return (string.match(rank, "^(%a+)") or rank)
-end
-
-local nmFolder, nmTrack, nmBound
-local function holdNmPose()
-	local c = char()
-	if not c then
-		return
-	end
-	local neck = c:FindFirstChild("Neck", true)
-	local waist = c:FindFirstChild("Waist", true)
-	if neck and neck:IsA("Motor6D") then
-		neck.Transform = CFrame.Angles(-math.rad(78), 0, 0)
-	end
-	if waist and waist:IsA("Motor6D") then
-		waist.Transform = CFrame.Angles(-math.rad(22), 0, 0)
+local function asExecutor()
+	if type(setthreadidentity) == "function" then
+		pcall(setthreadidentity, 8)
+	elseif type(syn) == "table" and type(syn.set_thread_identity) == "function" then
+		pcall(syn.set_thread_identity, 8)
 	end
 end
 
+local rankMeta
+local function loadRankMeta()
+	if rankMeta then
+		return rankMeta
+	end
+	pcall(function()
+		rankMeta = require(ReplicatedStorage.TS.rank["rank-meta"]).RankMeta
+	end)
+	if type(rankMeta) == "table" then
+		for _, div in pairs(rankMeta) do
+			if type(div) == "table" and type(div.name) == "string" and type(div.image) == "string" then
+				RANK_IMAGE[tierOf(div.name)] = div.image
+			end
+		end
+	end
+	return rankMeta
+end
+
+local function imageForRank(rank)
+	loadRankMeta()
+	local want = string.lower(tostring(rank or ""))
+	if type(rankMeta) == "table" then
+		for _, div in pairs(rankMeta) do
+			if type(div) == "table" and type(div.name) == "string" and string.lower(div.name) == want and type(div.image) == "string" then
+				return div.image
+			end
+		end
+	end
+	return RANK_IMAGE[tierOf(rank)]
+end
+
+local function isRankImage(image)
+	local id = string.match(tostring(image or ""), "%d+")
+	if not id then
+		return false
+	end
+	loadRankMeta()
+	for _, asset in pairs(RANK_IMAGE) do
+		if string.find(asset, id, 1, true) then
+			return true
+		end
+	end
+	if type(rankMeta) == "table" then
+		for _, div in pairs(rankMeta) do
+			if type(div) == "table" and type(div.image) == "string" and string.find(div.image, id, 1, true) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local nmTrack, nmEffect, nmFollow, nmAsset, nmLooked, nmMissing, nmKey, nmSent
 local function stopNm()
-	if nmBound then
+	if nmFollow then
 		pcall(function()
-			RunService:UnbindFromRenderStep("QW_NMPose")
+			RunService:UnbindFromRenderStep("QW_NMFollow")
 		end)
-		nmBound = false
+		nmFollow = false
 	end
 	if nmTrack then
 		pcall(function()
-			nmTrack:Stop()
+			nmTrack:Stop(0.1)
+			nmTrack:Destroy()
 		end)
 		nmTrack = nil
 	end
-	if nmFolder then
-		nmFolder:Destroy()
-		nmFolder = nil
+	if nmEffect then
+		nmEffect:Destroy()
+		nmEffect = nil
 	end
 	local c = char()
-	if c then
-		local neck = c:FindFirstChild("Neck", true)
-		local waist = c:FindFirstChild("Waist", true)
-		if neck and neck:IsA("Motor6D") then
-			neck.Transform = CFrame.new()
-		end
-		if waist and waist:IsA("Motor6D") then
-			waist.Transform = CFrame.new()
-		end
+	if c and c:GetAttribute("PlayingEmote") ~= nil then
+		pcall(function()
+			c:SetAttribute("PlayingEmote", nil)
+		end)
 	end
-	local h = hum()
-	if h then
-		h.AutoRotate = true
+	local ctrl = BW.emote or (BW.knit and BW.knit.Controllers and (BW.knit.Controllers.EmoteController or BW.knit.Controllers.EmotesController))
+	local maid = ctrl and ctrl.emoteAudioMaids and ctrl.emoteAudioMaids[lp.UserId]
+	if maid and maid.DoCleaning then
+		pcall(function()
+			maid:DoCleaning()
+		end)
 	end
 end
 
-local function hideEmoteWheel()
-	local gui = lp:FindFirstChild("PlayerGui")
-	if not gui then
-		return
+local function nightmareEmote()
+	local emoteMeta = require(ReplicatedStorage.TS.locker.emote["emote-meta"]).EmoteMeta
+	local emoteType = require(ReplicatedStorage.TS.locker.emote["emote-type"]).EmoteType
+	if emoteType and emoteType.NIGHTMARE and emoteMeta[emoteType.NIGHTMARE] then
+		return emoteType.NIGHTMARE, emoteMeta[emoteType.NIGHTMARE]
 	end
-	for _, inst in ipairs(gui:GetChildren()) do
-		local n = string.lower(inst.Name)
-		if inst:IsA("ScreenGui") and inst.Name ~= "Quantumware" and (string.find(n, "emote", 1, true) or string.find(n, "radial", 1, true)) then
-			inst.Enabled = false
+	for key, meta in pairs(emoteMeta) do
+		if key ~= (emoteType and emoteType.NONE) and type(meta) == "table" and type(meta.name) == "string" and string.lower(meta.name) == "nightmare" then
+			return key, meta
 		end
 	end
 end
 
-local function playOfficialNm()
-	local h = hum()
-	if not h then
-		return
+local function findNmAsset()
+	if nmLooked then
+		return nmAsset
 	end
-	local anim
-	pcall(function()
-		for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
-			if d:IsA("Animation") and string.find(string.lower(d.Name), "night", 1, true) then
-				anim = d
+	nmLooked = true
+	local best
+	for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+		local lname = string.lower(obj.Name)
+		if string.find(lname, "nightmare", 1, true) and (obj:IsA("Model") or obj:IsA("Folder")) and obj:FindFirstChildWhichIsA("BasePart", true) then
+			best = obj
+			if obj.Name == "NightmareEmote" or obj.Name == "Nightmare_1" then
 				break
 			end
+		end
+	end
+	nmAsset = best
+	return best
+end
+
+local function attachAura(model, r)
+	nmEffect = model:Clone()
+	nmEffect.Name = "QW_Nightmare"
+	for _, p in ipairs(nmEffect:GetDescendants()) do
+		if p:IsA("BasePart") then
+			p.CanCollide = false
+			p.CanQuery = false
+			p.CanTouch = false
+			p.Anchored = true
+		elseif p:IsA("ParticleEmitter") or p:IsA("Beam") or p:IsA("Trail") then
+			p.Enabled = true
+		end
+	end
+	nmEffect.Parent = workspace
+	pcall(function()
+		nmEffect:PivotTo(r.CFrame * CFrame.new(0, -2, 0))
+	end)
+	local outer, middle = nmEffect:FindFirstChild("Outer", true), nmEffect:FindFirstChild("Middle", true)
+	if outer and outer:IsA("BasePart") then
+		TweenService:Create(outer, TweenInfo.new(1.5, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1), {
+			Orientation = outer.Orientation + Vector3.new(0, 360, 0),
+		}):Play()
+	end
+	if middle and middle:IsA("BasePart") then
+		TweenService:Create(middle, TweenInfo.new(12.5, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1), {
+			Orientation = middle.Orientation + Vector3.new(0, -360, 0),
+		}):Play()
+	end
+	nmFollow = true
+	RunService:BindToRenderStep("QW_NMFollow", Enum.RenderPriority.Last.Value, function()
+		local rootPart = root()
+		if nmEffect and rootPart then
+			pcall(function()
+				nmEffect:PivotTo(rootPart.CFrame * CFrame.new(0, -2, 0))
+			end)
 		end
 	end)
-	if anim then
-		local ok, track = pcall(function()
-			return h:LoadAnimation(anim)
-		end)
-		if ok and track then
-			track.Looped = true
-			track.Priority = Enum.AnimationPriority.Action4
-			track:Play(0.1, 1, 1)
-			nmTrack = track
-		end
+end
+
+local function sendEmote(key)
+	if nmSent or not BW.client or not key then
+		return
 	end
 	local ctrl = BW.emote
-	if not ctrl and BW.knit and BW.knit.Controllers then
-		for name, c in pairs(BW.knit.Controllers) do
-			if string.find(string.lower(tostring(name)), "emote", 1, true) then
-				ctrl = c
-				BW.emote = c
-				break
-			end
-		end
-	end
-	if ctrl then
-		for _, fn in ipairs({ "playEmote", "useEmote", "play", "PlayEmote" }) do
-			if type(ctrl[fn]) == "function" then
-				pcall(ctrl[fn], ctrl, "nightmare")
-				break
-			end
-		end
-		if not BW.emoteRemote then
-			for _, fn in pairs(ctrl) do
-				if type(fn) == "function" then
-					BW.emoteRemote = dumpRemote(fn)
-					if BW.emoteRemote then
-						break
+	local remoteName
+	if ctrl and type(dbg.getconstants) == "function" then
+		for _, fn in pairs(ctrl) do
+			if type(fn) == "function" then
+				local ok, consts = pcall(dbg.getconstants, fn)
+				if ok and type(consts) == "table" then
+					for i, value in ipairs(consts) do
+						if value == "Client" and type(consts[i + 1]) == "string" and string.find(string.lower(consts[i + 1]), "emote", 1, true) then
+							remoteName = consts[i + 1]
+							break
+						end
 					end
 				end
 			end
+			if remoteName then
+				break
+			end
 		end
 	end
-	if BW.client and BW.emoteRemote then
+	if not remoteName then
+		return
+	end
+	local ok, remote = pcall(function()
+		return BW.client:Get(remoteName)
+	end)
+	if ok and remote and remote.SendToServer then
+		nmSent = true
 		pcall(function()
-			local rem = BW.client:Get(BW.emoteRemote)
-			rem:SendToServer({ emote = "nightmare" })
+			remote:SendToServer({ emote = key })
 		end)
 	end
 end
 
-local function weldPart(parent, rootp, size, offset, color, shape)
-	local p = Instance.new("Part")
-	p.Anchored = false
-	p.CanCollide = false
-	p.CanQuery = false
-	p.CanTouch = false
-	p.Massless = true
-	p.CastShadow = false
-	p.Material = Enum.Material.Neon
-	p.Color = color
-	p.Size = size
-	if shape then
-		p.Shape = shape
-	end
-	p.CFrame = rootp.CFrame * offset
-	p.Parent = parent
-	local w = Instance.new("WeldConstraint")
-	w.Part0 = rootp
-	w.Part1 = p
-	w.Parent = p
-	p.CFrame = rootp.CFrame * offset
-	return p
-end
-
-local function startNm()
-	stopNm()
-	hideEmoteWheel()
-	playOfficialNm()
-	local c, r, h = char(), root(), hum()
-	if not c or not r then
+local function playNm()
+	local c, h = char(), hum()
+	if not c or not h then
 		return
 	end
-	nmFolder = Instance.new("Folder")
-	nmFolder.Name = "QW_NM"
-	nmFolder.Parent = c
-	local disc = weldPart(nmFolder, r, Vector3.new(0.28, 7.2, 7.2), CFrame.new(0, 6.3, -0.2) * CFrame.Angles(0, 0, math.rad(90)), Color3.fromRGB(10, 12, 20), Enum.PartType.Cylinder)
-	disc.Material = Enum.Material.SmoothPlastic
-	local slice = weldPart(nmFolder, r, Vector3.new(0.34, 3.3, 3.3), CFrame.new(-1.35, 6.45, -0.15) * CFrame.Angles(0, 0, math.rad(90)), Color3.fromRGB(245, 246, 252), Enum.PartType.Cylinder)
-	slice.Material = Enum.Material.Neon
-	local beam = weldPart(nmFolder, r, Vector3.new(0.16, 9.5, 0.16), CFrame.new(0, 7.2, -0.2), Color3.fromRGB(255, 214, 70))
-	local tip = weldPart(nmFolder, r, Vector3.new(0.45, 0.9, 0.45), CFrame.new(0, 12.1, -0.2), Color3.fromRGB(255, 230, 120), Enum.PartType.Ball)
-	local light = Instance.new("PointLight")
-	light.Color = Color3.fromRGB(255, 210, 80)
-	light.Brightness = 3
-	light.Range = 16
-	light.Parent = beam
-	weldPart(nmFolder, r, Vector3.new(0.55, 0.55, 0.55), CFrame.new(2.5, 8.4, -0.3), Color3.fromRGB(255, 70, 50), Enum.PartType.Ball)
-	weldPart(nmFolder, r, Vector3.new(0.28, 0.28, 0.28), CFrame.new(2.15, 8.9, -0.2), Color3.fromRGB(255, 210, 60), Enum.PartType.Ball)
-	weldPart(nmFolder, r, Vector3.new(0.22, 0.22, 0.22), CFrame.new(2.85, 8.05, -0.15), Color3.fromRGB(255, 180, 40), Enum.PartType.Ball)
-	if h then
-		h.AutoRotate = false
+	if nmTrack and nmTrack.IsPlaying and c:GetAttribute("PlayingEmote") ~= nil then
+		return
 	end
-	if not nmBound then
-		nmBound = true
-		RunService:BindToRenderStep("QW_NMPose", Enum.RenderPriority.Last.Value, holdNmPose)
+	local key, meta
+	local ok, errKey, errMeta = pcall(nightmareEmote)
+	if ok then
+		key, meta = errKey, errMeta
 	end
+	if not meta or key == nil then
+		if not nmMissing then
+			nmMissing = true
+			notify("Nightmare emote is not in this place's emote list")
+		end
+		return
+	end
+	stopNm()
+	nmKey = key
+	c = char()
+	h = hum()
+	if not c or not h then
+		return
+	end
+	local ctrl = BW.emote or (BW.knit and BW.knit.Controllers and (BW.knit.Controllers.EmoteController or BW.knit.Controllers.EmotesController))
+	BW.emote = ctrl
+	c:SetAttribute("PlayingEmote", key)
+	local playSounds = ctrl and (ctrl.createEmoteBeginAudioPlayers or ctrl.playEmoteBeginSounds)
+	if playSounds then
+		pcall(playSounds, ctrl, key, lp)
+	end
+	sendEmote(key)
+	local animation = meta.animation
+	if not animation and meta.emoteDisplayType then
+		pcall(function()
+			local display = require(ReplicatedStorage.TS.locker.emote["emote-display-meta"]).EmoteDisplayMeta[meta.emoteDisplayType]
+			animation = display and display.animation
+		end)
+	end
+	if animation and animation.type then
+		local played = pcall(function()
+			local animUtil = require(ReplicatedStorage.TS.animation["animation-util"]).GameAnimationUtil
+			nmTrack = h:LoadAnimation(animUtil:getAnimation(animation.type))
+			nmTrack.Looped = true
+			nmTrack.Priority = Enum.AnimationPriority.Action
+			nmTrack:Play(0.15, 1, animation.speed or 1)
+		end)
+		if not played then
+			nmTrack = nil
+		end
+	end
+	task.delay(0.4, function()
+		local mod = Modules["Fake NM Emote"]
+		if not mod or not mod.enabled or nmEffect then
+			return
+		end
+		local body = char()
+		local r = root()
+		if not body or not r then
+			return
+		end
+		if body:FindFirstChild("Outer", true) or body:FindFirstChild("NightmareEmote", true) or workspace:FindFirstChild("NightmareEmote") then
+			return
+		end
+		local okAsset, asset = pcall(findNmAsset)
+		if okAsset and asset then
+			attachAura(asset, r)
+		end
+	end)
 end
 
-local statsOrig = {}
-local statsHooked = {}
-local realUser, realDisplay
-local rankWords = { "Nightmare", "Emerald", "Diamond", "Platinum", "Gold", "Silver", "Bronze" }
+local oldUsername, oldDisplay
+local statSwapped, statWatch = {}, {}
+local statWriting
+local realNames = {}
+local shownName = ""
 
-local function plainReplace(s, old, new)
-	if not old or old == "" or old == new or not string.find(s, old, 1, true) then
-		return s
+local function gamePlayerClass()
+	local ok, util = pcall(function()
+		return require(ReplicatedStorage.TS.player["player-util"]).GamePlayerUtil
+	end)
+	if not ok or type(util) ~= "table" or type(util.getGamePlayer) ~= "function" then
+		return
 	end
-	local out, i = {}, 1
-	while true do
-		local a, b = string.find(s, old, i, true)
-		if not a then
-			table.insert(out, string.sub(s, i))
-			break
-		end
-		table.insert(out, string.sub(s, i, a - 1))
-		table.insert(out, new)
-		i = b + 1
+	local gp = util.getGamePlayer(lp)
+	local mt = gp and getmetatable(gp)
+	local class = mt and mt.__index
+	if type(class) == "table" and type(class.getUsername) == "function" and type(class.getDisplayName) == "function" then
+		return class
 	end
-	return table.concat(out)
 end
 
 local function commaNum(n)
@@ -1832,183 +1923,634 @@ local function commaNum(n)
 	return s
 end
 
-local function rewriteStatText(t, m)
-	if type(t) ~= "string" or t == "" or #t > 90 then
-		return t
+local function statText(text, m)
+	if type(text) ~= "string" or text == "" or #text > 90 then
+		return text
 	end
 	local name = tostring(get(m, "Name") or "")
-	local rank = tostring(get(m, "Rank") or "")
+	local rank = tostring(get(m, "Rank") or "Platinum 4")
 	local rp = math.floor(tonumber(get(m, "RP")) or 0)
-	local lb = tonumber(get(m, "Leaderboard")) or 1
+	local lb = tonumber((tostring(get(m, "Leaderboard") or "1"):gsub(",", ""))) or 1
 	if name ~= "" then
-		t = plainReplace(t, realUser, name)
-		t = plainReplace(t, realDisplay, name)
+		for _, old in ipairs(realNames) do
+			if old ~= "" and old ~= name then
+				local a, b = string.find(text, old, 1, true)
+				if a then
+					text = string.sub(text, 1, a - 1) .. name .. string.sub(text, b + 1)
+				end
+			end
+		end
+		if shownName ~= "" and shownName ~= name then
+			local a, b = string.find(text, shownName, 1, true)
+			if a then
+				text = string.sub(text, 1, a - 1) .. name .. string.sub(text, b + 1)
+			end
+		end
 	end
-	if string.find(t, "Leaderboard Rank", 1, true) then
+	if string.find(text, "Leaderboard Rank", 1, true) then
 		return "Leaderboard Rank: " .. commaNum(lb)
 	end
-	if string.find(string.lower(t), "rp", 1, true) and string.find(t, "/", 1, true) and #t < 24 then
+	if #text < 28 and string.find(string.lower(text), "rp", 1, true) and string.find(text, "/", 1, true) then
 		return tostring(rp) .. " RP / 100"
 	end
-	local trimmed = string.match(t, "^%s*(.-)%s*$") or t
-	if #trimmed <= 16 then
-		for _, word in ipairs(rankWords) do
+	local trimmed = string.match(text, "^%s*(.-)%s*$") or text
+	if #trimmed <= 18 then
+		for _, word in ipairs({ "Nightmare", "Emerald", "Diamond", "Platinum", "Gold", "Silver", "Bronze" }) do
 			if string.find(trimmed, word, 1, true) then
 				return rank
 			end
 		end
 	end
-	return t
+	return text
 end
 
-local function ownedByUs(inst, m)
-	local gui = inst:FindFirstAncestorWhichIsA("SurfaceGui") or inst:FindFirstAncestorWhichIsA("BillboardGui") or inst:FindFirstAncestorWhichIsA("ScreenGui")
-	if not gui or gui.Name == "Quantumware" then
+local mineAnswer = setmetatable({}, { __mode = "k" })
+
+local function nameList()
+	local names, seen = {}, {}
+	local function push(n)
+		if type(n) == "string" and n ~= "" and not seen[n] then
+			seen[n] = true
+			table.insert(names, n)
+		end
+	end
+	for _, n in ipairs(realNames) do
+		push(n)
+	end
+	push(shownName)
+	local mod = Modules["Fake Stats"]
+	if mod then
+		push(tostring(get(mod, "Name") or ""))
+	end
+	return names
+end
+
+local function textHasName(text, names)
+	if type(text) ~= "string" then
 		return false
 	end
-	local pg = lp:FindFirstChild("PlayerGui")
-	if pg and gui:IsDescendantOf(pg) then
-		return true
-	end
-	local fake = tostring(get(m, "Name") or "")
-	for _, d in ipairs(gui:GetDescendants()) do
-		if d:IsA("TextLabel") or d:IsA("TextButton") then
-			local tx = d.Text
-			if (realUser and string.find(tx, realUser, 1, true)) or (realDisplay and realDisplay ~= "" and string.find(tx, realDisplay, 1, true)) or (fake ~= "" and string.find(tx, fake, 1, true)) then
-				return true
-			end
+	for _, n in ipairs(names) do
+		if string.find(text, n, 1, true) then
+			return true
 		end
 	end
 	return false
 end
 
-local function paintStat(inst, m)
-	if statsHooked[inst] == "busy" or not inst.Parent then
-		return
-	end
-	if screen and inst:IsDescendantOf(screen) then
-		return
-	end
-	if not ownedByUs(inst, m) then
-		return
-	end
-	local nextText = rewriteStatText(inst.Text, m)
-	if nextText ~= inst.Text then
-		if not statsOrig[inst] then
-			statsOrig[inst] = inst.Text
+local function cardIsMine(obj)
+	local names = nameList()
+	local node = obj
+	for _ = 1, 8 do
+		node = node and node.Parent
+		if not node or node:IsA("ScreenGui") or node.Name == "Quantumware" then
+			return false
 		end
-		statsHooked[inst] = "busy"
-		inst.Text = nextText
-		local tier = rankTier(tostring(get(m, "Rank") or ""))
-		if RANK_COLOR[tier] and string.find(nextText, tier, 1, true) and #nextText < 20 then
-			inst.TextColor3 = RANK_COLOR[tier]
+		local cached = mineAnswer[node]
+		if cached == true then
+			return true
 		end
-		if string.find(nextText, "RP /", 1, true) and inst.Parent then
-			local rp = math.floor(tonumber(get(m, "RP")) or 0)
-			for _, s in ipairs(inst.Parent:GetDescendants()) do
-				if s:IsA("Frame") and s.AbsoluteSize.Y > 0 and s.AbsoluteSize.Y < 22 and s.BackgroundTransparency < 0.4 then
-					s.Size = UDim2.new(math.clamp(rp / 100, 0, 1), 0, s.Size.Y.Scale, s.Size.Y.Offset)
+		if cached == nil then
+			local count, hit = 0, false
+			local cap = (node:IsA("SurfaceGui") or node:IsA("BillboardGui")) and 900 or 280
+			for _, ch in ipairs(node:GetDescendants()) do
+				count += 1
+				if count > cap then
+					break
+				end
+				if (ch:IsA("TextLabel") or ch:IsA("TextButton") or ch:IsA("TextBox")) and textHasName(ch.Text, names) then
+					hit = true
+					break
+				end
+			end
+			if hit or count <= cap then
+				mineAnswer[node] = hit
+			end
+			if hit then
+				return true
+			end
+		end
+		if node:IsA("SurfaceGui") or node:IsA("BillboardGui") then
+			return false
+		end
+	end
+	return false
+end
+
+local function paintStatObject(obj, m)
+	if statWriting == obj or not obj or not obj.Parent or obj:FindFirstAncestor("Quantumware") then
+		return
+	end
+	local isImage = obj:IsA("ImageLabel") or obj:IsA("ImageButton")
+	local isText = obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")
+	if not isImage and not isText then
+		return
+	end
+	asExecutor()
+	if isImage then
+		if isRankImage(obj.Image) and cardIsMine(obj) then
+			local nextImage = imageForRank(get(m, "Rank"))
+			if nextImage and obj.Image ~= nextImage then
+				if statSwapped[obj] == nil then
+					statSwapped[obj] = obj.Image
+				end
+				statWriting = obj
+				obj.Image = nextImage
+				statWriting = nil
+			end
+		end
+		return
+	end
+	local nextText = statText(obj.Text, m)
+	local rank = tostring(get(m, "Rank") or "")
+	local rankish = nextText == rank or string.find(nextText, "Leaderboard Rank", 1, true) or string.find(tostring(nextText), "RP /", 1, true)
+	if nextText ~= obj.Text and rankish and not cardIsMine(obj) then
+		return
+	end
+	if nextText ~= obj.Text then
+		if statSwapped[obj] == nil then
+			statSwapped[obj] = obj.Text
+		end
+		statWriting = obj
+		obj.Text = nextText
+		statWriting = nil
+		if not statWatch[obj] then
+			statWatch[obj] = obj:GetPropertyChangedSignal("Text"):Connect(function()
+				local mod = Modules["Fake Stats"]
+				if mod and mod.enabled and statWriting ~= obj then
+					paintStatObject(obj, mod)
+				end
+			end)
+		end
+	end
+end
+
+local function scanStatRoot(root, m, worldBoards)
+	if not root or not (Modules["Fake Stats"] and Modules["Fake Stats"].enabled) then
+		return
+	end
+	asExecutor()
+	local clock = os.clock()
+	local list = worldBoards and {} or root:GetDescendants()
+	if worldBoards then
+		for _, obj in ipairs(root:GetDescendants()) do
+			if obj:IsA("SurfaceGui") or obj:IsA("BillboardGui") then
+				table.insert(list, obj)
+			end
+			if os.clock() - clock > 0.003 then
+				task.wait()
+				clock = os.clock()
+				if not (Modules["Fake Stats"] and Modules["Fake Stats"].enabled) then
+					return
 				end
 			end
 		end
-		statsHooked[inst] = true
+		local boards = list
+		list = {}
+		for _, gui in ipairs(boards) do
+			table.insert(list, gui)
+			for _, obj in ipairs(gui:GetDescendants()) do
+				table.insert(list, obj)
+			end
+		end
+	end
+	table.clear(mineAnswer)
+	for _, obj in ipairs(list) do
+		paintStatObject(obj, m)
+		if os.clock() - clock > 0.003 then
+			task.wait()
+			clock = os.clock()
+			asExecutor()
+			if not (Modules["Fake Stats"] and Modules["Fake Stats"].enabled) then
+				return
+			end
+		end
 	end
 end
 
-local function hookStatLabel(inst, m)
-	if statsHooked[inst] or not (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
+local function hookGamePlayer()
+	local class = gamePlayerClass()
+	if not class or oldUsername then
 		return
 	end
-	statsHooked[inst] = true
-	inst:GetPropertyChangedSignal("Text"):Connect(function()
+	oldUsername, oldDisplay = class.getUsername, class.getDisplayName
+	local function playerOf(self)
+		if type(self) ~= "table" or type(self.getPlayer) ~= "function" then
+			return
+		end
+		local ok, player = pcall(self.getPlayer, self)
+		if ok then
+			return player
+		end
+	end
+	class.getUsername = function(self, ...)
 		local mod = Modules["Fake Stats"]
-		if mod and mod.enabled then
-			paintStat(inst, mod)
+		if mod and mod.enabled and playerOf(self) == lp then
+			return tostring(get(mod, "Name") or shownName)
 		end
-	end)
-	paintStat(inst, m)
+		return oldUsername(self, ...)
+	end
+	class.getDisplayName = function(self, ...)
+		local mod = Modules["Fake Stats"]
+		if mod and mod.enabled and playerOf(self) == lp then
+			return tostring(get(mod, "Name") or shownName)
+		end
+		return oldDisplay(self, ...)
+	end
 end
 
-local function scanStats(root, m)
-	if not root then
+local function unhookGamePlayer()
+	local class = gamePlayerClass()
+	if class and oldUsername then
+		class.getUsername = oldUsername
+		class.getDisplayName = oldDisplay
+	end
+	oldUsername, oldDisplay = nil, nil
+end
+
+local RANK_REMOTE = {
+	FetchRanks = true,
+	RequestProfileData = true,
+}
+
+local function divisionIdFor(rankName)
+	loadRankMeta()
+	local want = string.lower(tostring(rankName or ""))
+	if type(rankMeta) ~= "table" then
 		return
 	end
-	for _, d in ipairs(root:GetDescendants()) do
-		if d:IsA("TextLabel") or d:IsA("TextButton") then
-			hookStatLabel(d, m)
+	for key, div in pairs(rankMeta) do
+		if type(div) == "table" and type(div.name) == "string" and string.lower(div.name) == want then
+			return key
 		end
 	end
 end
 
-add("Larping", "Fake NM Emote", "Nightmare pose and aura, no picker wheel. Fires the emote remote", function(m)
-	opt(m, "Aura", "toggle", true)
-end, function(on)
-	if on then
-		startNm()
-	else
-		stopNm()
-		local h = hum()
-		if h then
-			h.AutoRotate = true
+local SKIP_PROFILE = {
+	matchHistory = true,
+	players = true,
+	matches = true,
+	queues = true,
+	favoriteKitData = true,
+}
+
+local function patchProfile(value, force, depth, rankName, rp, lb, fakeName, divId)
+	if depth > 5 or type(value) ~= "table" or value.andThen or value.expect or value.await then
+		return
+	end
+	local uid = value.userId or value.playerId or value.user_id
+	if uid ~= nil and uid ~= lp and tonumber(uid) ~= lp.UserId then
+		return
+	end
+	local mine = force or uid == lp or tonumber(uid) == lp.UserId
+	for key, field in pairs(value) do
+		if type(key) == "number" or SKIP_PROFILE[key] then
+			continue
 		end
+		local lk = string.lower(tostring(key))
+		if type(field) == "table" then
+			patchProfile(field, mine, depth + 1, rankName, rp, lb, fakeName, divId)
+		elseif mine then
+			if divId ~= nil and (lk == "rankdivision" or lk == "division" or lk == "rankeddivision" or lk == "currentdivision") then
+				value[key] = divId
+			elseif type(field) == "string" and (lk == "rankname" or lk == "divisionname") then
+				value[key] = rankName
+			elseif type(field) == "string" and (lk == "displayname" or lk == "username" or lk == "name") then
+				if fakeName ~= "" and (field == lp.Name or field == lp.DisplayName or field == shownName or field == realNames[1] or field == realNames[2]) then
+					value[key] = fakeName
+				end
+			elseif type(field) == "number" and (lk == "rp" or lk == "rankpoints" or lk == "rankedrp" or lk == "currentrp" or lk == "rpindivision") then
+				value[key] = rp
+			elseif type(field) == "number" and (lk == "leaderboardrank" or lk == "leaderboardposition" or lk == "leaderboardplacement" or lk == "rankposition") then
+				value[key] = lb
+			end
+		end
+	end
+	if type(value[1]) == "table" then
+		for _, entry in ipairs(value) do
+			patchProfile(entry, force, depth + 1, rankName, rp, lb, fakeName, divId)
+		end
+	end
+end
+
+local function rewriteRankResult(value, requested)
+	local mod = Modules["Fake Stats"]
+	if not mod or not mod.enabled or type(value) ~= "table" or value.andThen then
+		return
+	end
+	local rankName = tostring(get(mod, "Rank") or "Platinum 4")
+	local rp = math.floor(tonumber(get(mod, "RP")) or 0)
+	local lb = tonumber((tostring(get(mod, "Leaderboard") or "1"):gsub(",", ""))) or 1
+	local fakeName = tostring(get(mod, "Name") or "")
+	patchProfile(value, requested, 0, rankName, rp, lb, fakeName, divisionIdFor(rankName))
+end
+
+local function wrapRankCall(fn, remote)
+	return function(_, ...)
+		local requested = false
+		for i = 1, select("#", ...) do
+			local arg = select(i, ...)
+			if arg == lp or arg == lp.UserId or tostring(arg) == tostring(lp.UserId) then
+				requested = true
+			elseif type(arg) == "table" and (arg[1] == lp.UserId or arg[1] == lp or arg.userId == lp.UserId or arg.player == lp) then
+				requested = true
+			end
+		end
+		local packed = table.pack(fn(remote, ...))
+		for i = 1, packed.n do
+			local item = packed[i]
+			if type(item) == "table" and not item.__qwRanks then
+				if type(item.andThen) == "function" and not item.__qwThen then
+					local oldThen = item.andThen
+					item.andThen = function(promise, callback, ...)
+						return oldThen(promise, function(result, ...)
+							rewriteRankResult(result, requested)
+							if type(callback) == "function" then
+								return callback(result, ...)
+							end
+						end, ...)
+					end
+					item.__qwThen = true
+				end
+				if type(item.expect) == "function" and not item.__qwExpect then
+					local oldExpect = item.expect
+					item.expect = function(promise, ...)
+						local result = oldExpect(promise, ...)
+						rewriteRankResult(result, requested)
+						return result
+					end
+					item.__qwExpect = true
+				end
+				if type(item.await) == "function" and not item.__qwAwait then
+					local oldAwait = item.await
+					item.await = function(promise, ...)
+						local result = oldAwait(promise, ...)
+						rewriteRankResult(result, requested)
+						return result
+					end
+					item.__qwAwait = true
+				end
+				if not item.andThen and not item.expect and not item.await then
+					rewriteRankResult(item, requested)
+				end
+			end
+		end
+		return table.unpack(packed, 1, packed.n)
+	end
+end
+
+local ranksHooked = false
+function hookRankRemotes()
+	if ranksHooked then
+		return
+	end
+	local client = BW.client
+	if type(client) ~= "table" or type(client.Get) ~= "function" then
+		return
+	end
+	local original = client.Get
+	local originalThrow = client.GetOrThrow
+	local wrappedRemotes = setmetatable({}, { __mode = "k" })
+	local function wrapRemote(id, remote)
+		if type(remote) ~= "table" or not RANK_REMOTE[tostring(id)] then
+			return remote
+		end
+		if wrappedRemotes[remote] then
+			return wrappedRemotes[remote]
+		end
+		local cache = {}
+		local proxy = setmetatable(cache, {
+			__index = function(_, key)
+				local value = remote[key]
+				if type(value) == "function" and (key == "CallServer" or key == "CallServerAsync" or key == "InvokeServer" or key == "Fire") then
+					local wrapped = wrapRankCall(value, remote)
+					cache[key] = wrapped
+					return wrapped
+				end
+				if type(value) == "function" then
+					local wrapped = function(_, ...)
+						return value(remote, ...)
+					end
+					cache[key] = wrapped
+					return wrapped
+				end
+				cache[key] = value
+				return value
+			end,
+		})
+		wrappedRemotes[remote] = proxy
+		return proxy
+	end
+	client.Get = function(self, id, ...)
+		return wrapRemote(id, original(self, id, ...))
+	end
+	if type(originalThrow) == "function" then
+		client.GetOrThrow = function(self, id, ...)
+			return wrapRemote(id, originalThrow(self, id, ...))
+		end
+	end
+	ranksHooked = true
+end
+task.defer(function()
+	pcall(hookRankRemotes)
+end)
+
+local textHooked = false
+local function hookTextWrites()
+	if textHooked or type(hookmetamethod) ~= "function" then
+		return
+	end
+	local old
+	local wrap = type(newcclosure) == "function" and newcclosure or function(fn)
+		return fn
+	end
+	old = hookmetamethod(game, "__newindex", wrap(function(obj, key, value)
+		local mod = Modules["Fake Stats"]
+		if not mod or not mod.enabled or statWriting == obj or typeof(obj) ~= "Instance" or type(value) ~= "string" then
+			return old(obj, key, value)
+		end
+		local isText = key == "Text" and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox"))
+		local isImage = key == "Image" and (obj:IsA("ImageLabel") or obj:IsA("ImageButton"))
+		if not isText and not isImage then
+			return old(obj, key, value)
+		end
+		if obj:FindFirstAncestor("Quantumware") then
+			return old(obj, key, value)
+		end
+		local replacement = value
+		local ok, changed = pcall(function()
+			if isText then
+				local nextText = statText(value, mod)
+				if nextText == value then
+					return value
+				end
+				local rank = tostring(get(mod, "Rank") or "")
+				local rankish = nextText == rank or string.find(nextText, "Leaderboard Rank", 1, true) ~= nil or string.find(nextText, "RP /", 1, true) ~= nil
+				if rankish and not cardIsMine(obj) then
+					return value
+				end
+				if statSwapped[obj] == nil then
+					statSwapped[obj] = obj.Text
+				end
+				return nextText
+			end
+			if isRankImage(value) and cardIsMine(obj) then
+				local nextImage = imageForRank(get(mod, "Rank"))
+				if nextImage and nextImage ~= value then
+					if statSwapped[obj] == nil then
+						statSwapped[obj] = obj.Image
+					end
+					return nextImage
+				end
+			end
+			return value
+		end)
+		if ok and type(changed) == "string" then
+			replacement = changed
+		end
+		statWriting = obj
+		local result = old(obj, key, replacement)
+		statWriting = nil
+		return result
+	end))
+	textHooked = old ~= nil
+end
+
+add("Larping", "Fake NM Emote", "Plays the real Nightmare emote: pose, sound, and aura. No picker", nil, function(on)
+	if on then
+		nmMissing = false
+		nmSent = false
+		playNm()
+	else
+		nmKey = nil
+		nmSent = false
+		stopNm()
 	end
 end, function()
-	if not nmFolder or not nmFolder.Parent then
-		startNm()
+	local mod = Modules["Fake NM Emote"]
+	if not mod or not mod.enabled then
+		return
 	end
-end, 0.5)
+	local body = char()
+	if body and nmKey ~= nil and body:GetAttribute("PlayingEmote") ~= nmKey then
+		pcall(function()
+			body:SetAttribute("PlayingEmote", nmKey)
+		end)
+	end
+	local pg = lp:FindFirstChildOfClass("PlayerGui")
+	if pg then
+		for _, gui in ipairs(pg:GetChildren()) do
+			if gui:IsA("ScreenGui") and gui.Enabled then
+				local lname = string.lower(gui.Name)
+				if string.find(lname, "emote", 1, true) and (string.find(lname, "wheel", 1, true) or string.find(lname, "picker", 1, true) or string.find(lname, "radial", 1, true)) then
+					gui.Enabled = false
+				end
+			end
+		end
+	end
+	local h = hum()
+	if h and (not nmTrack or not nmTrack.IsPlaying) then
+		playNm()
+	end
+end, 0.75)
 
-add("Larping", "Fake Stats", "Spoofs your name, ranked division, RP bar, and leaderboard #", function(m)
-	opt(m, "Name", "text", lp.DisplayName or lp.Name)
-	opt(m, "Rank", "list", "Platinum 4", { list = RANK_LIST })
-	opt(m, "RP", "slider", 20, { min = 0, max = 100, suffix = " RP" })
-	opt(m, "Leaderboard", "text", "1880")
+add("Larping", "Fake Stats", "Changes the name, rank, RP, and leaderboard slot the game UI reads", function(m)
+	opt(m, "Name", "text", "corapses")
+	opt(m, "Rank", "list", "Nightmare", { list = RANK_LIST })
+	opt(m, "RP", "slider", 100, { min = 0, max = 100, suffix = " RP" })
+	opt(m, "Leaderboard", "text", "1")
 end, function(on, m)
 	if on then
-		realUser = realUser or lp.Name
-		realDisplay = realDisplay or lp.DisplayName
-		local function watch(root)
+		realNames = {}
+		shownName = ""
+		if lp.Name ~= "" then
+			table.insert(realNames, lp.Name)
+		end
+		if lp.DisplayName ~= "" and lp.DisplayName ~= lp.Name then
+			table.insert(realNames, lp.DisplayName)
+		end
+		hookGamePlayer()
+		pcall(hookRankRemotes)
+		pcall(hookTextWrites)
+		shownName = tostring(get(m, "Name") or "")
+		local function watch(root, guisOnly)
 			if not root then
 				return
 			end
-			table.insert(m.conns, root.DescendantAdded:Connect(function(inst)
-				if m.enabled and (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
-					hookStatLabel(inst, m)
+			table.insert(m.conns, root.DescendantAdded:Connect(function(obj)
+				if m.enabled then
+					task.defer(paintStatObject, obj, m)
 				end
 			end))
-			scanStats(root, m)
+			task.spawn(scanStatRoot, root, m, guisOnly)
 		end
-		watch(lp:FindFirstChild("PlayerGui"))
+		watch(lp:FindFirstChildOfClass("PlayerGui"), false)
 		pcall(function()
-			watch(game:GetService("CoreGui"))
+			watch(game:GetService("CoreGui"), false)
 		end)
-		for _, d in ipairs(workspace:GetDescendants()) do
-			if d:IsA("SurfaceGui") or d:IsA("BillboardGui") then
-				scanStats(d, m)
+		pcall(function()
+			if type(gethui) == "function" then
+				watch(gethui(), false)
 			end
-		end
-		table.insert(m.conns, workspace.DescendantAdded:Connect(function(inst)
-			if m.enabled and (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
-				local gui = inst:FindFirstAncestorWhichIsA("SurfaceGui") or inst:FindFirstAncestorWhichIsA("BillboardGui")
-				if gui then
-					hookStatLabel(inst, m)
+		end)
+		watch(lp.Character, false)
+		task.spawn(scanStatRoot, workspace, m, true)
+		table.insert(m.conns, workspace.DescendantAdded:Connect(function(obj)
+			if not m.enabled then
+				return
+			end
+			if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") or obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+				if obj:FindFirstAncestorWhichIsA("SurfaceGui") or obj:FindFirstAncestorWhichIsA("BillboardGui") then
+					task.defer(paintStatObject, obj, m)
 				end
 			end
 		end))
-	else
-		for inst, t in pairs(statsOrig) do
-			if inst.Parent then
-				pcall(function()
-					inst.Text = t
+		task.delay(1.2, function()
+			if not m.enabled then
+				return
+			end
+			local pg = lp:FindFirstChildOfClass("PlayerGui")
+			if pg then
+				scanStatRoot(pg, m, false)
+			end
+			scanStatRoot(workspace, m, true)
+		end)
+		table.insert(m.conns, lp.CharacterAdded:Connect(function(character)
+			if m.enabled then
+				task.delay(0.4, function()
+					if m.enabled then
+						scanStatRoot(character, m, false)
+					end
 				end)
 			end
+		end))
+	else
+		unhookGamePlayer()
+		asExecutor()
+		for _, conn in pairs(statWatch) do
+			pcall(function()
+				conn:Disconnect()
+			end)
 		end
-		statsOrig = {}
+		table.clear(statWatch)
+		for obj, old in pairs(statSwapped) do
+			if typeof(obj) == "Instance" and obj.Parent then
+				statWriting = obj
+				if obj:IsA("ImageLabel") or obj:IsA("ImageButton") then
+					obj.Image = old
+				elseif obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+					obj.Text = old
+				end
+			end
+		end
+		statWriting = nil
+		table.clear(statSwapped)
+		shownName = ""
 		pcall(function()
-			lp.DisplayName = realDisplay or lp.Name
+			lp.DisplayName = realNames[2] or realNames[1] or lp.Name
 		end)
 	end
 end, function(m)
+	pcall(hookRankRemotes)
 	local name = tostring(get(m, "Name") or "")
 	if name ~= "" then
 		pcall(function()
@@ -2021,15 +2563,13 @@ end, function(m)
 			end)
 		end
 	end
-	for inst in pairs(statsHooked) do
-		if typeof(inst) == "Instance" and inst.Parent then
-			paintStat(inst, m)
-		else
-			statsHooked[inst] = nil
+	shownName = name
+	for obj in pairs(statWatch) do
+		if typeof(obj) == "Instance" and obj.Parent then
+			paintStatObject(obj, m)
 		end
 	end
-end, 0.25)
-
+end, 1)
 add("World", "Nuker", "Fast-breaks bed defense, then the bed", function(m)
 	opt(m, "Range", "slider", 30, { min = 10, max = 40, suffix = " st" })
 	opt(m, "Delay", "slider", 80, { min = 40, max = 300, step = 10, suffix = "ms" })
