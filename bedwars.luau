@@ -185,6 +185,7 @@ local function hookKnit()
 			BW.sprint = knit.Controllers and knit.Controllers.SprintController
 			BW.breaker = knit.Controllers and knit.Controllers.BlockBreakController
 			BW.placer = knit.Controllers and knit.Controllers.BlockPlacementController
+			BW.emote = knit.Controllers and (knit.Controllers.EmoteController or knit.Controllers.EmotesController)
 			pcall(function()
 				BW.client = require(ReplicatedStorage.TS.remotes).default.Client
 			end)
@@ -227,6 +228,11 @@ local function hookKnit()
 				end
 			end
 			BW.ready = BW.sword ~= nil or BW.client ~= nil
+			pcall(function()
+				if BW.sword and type(hookSwing) == "function" then
+					hookSwing()
+				end
+			end)
 			return BW.ready
 		end
 		task.wait(0.25)
@@ -470,57 +476,78 @@ local function pick(range, o)
 	return best, bestRoot, bestDist
 end
 
+local attackRemote
 local function sendAttack(target, targetRoot, mode, cfg)
 	cfg = cfg or {}
 	local me = root()
 	if not me or not target or not target.Character or not targetRoot then
 		return false
 	end
-	if not (BW.client and BW.attack) then
-		return false
-	end
 	local weapon
 	if cfg.switch == false then
-		local inv = inventory()
-		weapon = inv and isSword(inv.hand) and inv.hand.tool
+		weapon = handTool()
 	else
-		weapon = equipSword()
-	end
-	if typeof(weapon) ~= "Instance" then
-		return false
-	end
-	if cfg.swing and BW.sword then
-		pcall(function()
-			BW.sword:playSwordEffect(metaOf(weapon.Name), false)
-		end)
+		weapon = equipSword() or handTool()
 	end
 	mode = mode or "walls"
 	local aim = CFrame.lookAt(me.Position, targetRoot.Position)
 	local delta = targetRoot.Position - me.Position
 	local selfPos = me.Position + aim.LookVector * math.max(delta.Magnitude - 14.2, 0)
-	local camPos = mode == "walls" and (targetRoot.Position - aim.LookVector * 2.5) or cam.CFrame.Position
-	local cursor = mode == "walls" and aim.LookVector or CFrame.lookAt(cam.CFrame.Position, targetRoot.Position).LookVector
+	local camPos = cam and cam.CFrame.Position or me.Position
+	if mode == "walls" then
+		camPos = targetRoot.Position - aim.LookVector * 2.5
+	end
+	local cursor = mode == "walls" and aim.LookVector or CFrame.lookAt(camPos, targetRoot.Position).LookVector
 	if BW.sword then
 		pcall(function()
 			BW.sword.lastSwingServerTime = workspace:GetServerTimeNow() - 0.45
 		end)
+		if cfg.swing and type(BW.sword.playSwordEffect) == "function" then
+			pcall(BW.sword.playSwordEffect, BW.sword)
+		end
 	end
-	return pcall(function()
-		BW.client:Get(BW.attack):SendToServer({
-			weapon = weapon,
-			chargedAttack = { chargeRatio = 0 },
-			lastSwingServerTimeDelta = 0.45,
-			entityInstance = target.Character,
-			validate = {
-				raycast = {
-					cameraPosition = { value = camPos },
-					cursorDirection = { value = cursor },
-				},
-				targetPosition = { value = targetRoot.Position },
-				selfPosition = { value = selfPos },
+	local payload = {
+		weapon = weapon,
+		chargedAttack = { chargeRatio = 0 },
+		lastSwingServerTimeDelta = 0.45,
+		entityInstance = target.Character,
+		validate = {
+			raycast = {
+				cameraPosition = { value = camPos },
+				cursorDirection = { value = cursor },
 			},
-		})
-	end)
+			targetPosition = { value = targetRoot.Position },
+			selfPosition = { value = selfPos },
+		},
+	}
+	local sent = false
+	if BW.client and BW.attack then
+		if not attackRemote then
+			pcall(function()
+				attackRemote = BW.client:Get(BW.attack)
+			end)
+		end
+		if attackRemote then
+			sent = pcall(function()
+				attackRemote:SendToServer(payload)
+			end)
+		end
+	end
+	if not sent and BW.sword and type(BW.sword.sendServerRequest) == "function" then
+		sent = pcall(function()
+			BW.sword:sendServerRequest(payload)
+		end)
+	end
+	if not sent and BW.sword and type(BW.sword.attackEntity) == "function" then
+		sent = pcall(function()
+			BW.sword:attackEntity({
+				getInstance = function()
+					return target.Character
+				end,
+			})
+		end)
+	end
+	return sent
 end
 
 local function snap3(pos)
@@ -538,19 +565,13 @@ local function breakKind(part)
 	return "stone"
 end
 
+local breakFn
 local function mineBlock(part)
 	if not part or not part:IsA("BasePart") then
 		return
 	end
 	equipBreaker(breakKind(part))
 	local blockPosition = snap3(part.Position)
-	local ref = { blockPosition = blockPosition }
-	local payload = {
-		blockRef = ref,
-		blockPosition = blockPosition,
-		hitPosition = part.Position,
-		hitNormal = Vector3.yAxis,
-	}
 	local breaker = BW.breaker and BW.breaker.blockBreaker
 	if breaker then
 		breaker.breakCooldown = 0
@@ -558,29 +579,24 @@ local function mineBlock(part)
 		breaker.lastBreakTime = 0
 		breaker.lastHitTime = 0
 		breaker.nextBreakTime = 0
-		for name, fn in pairs(breaker) do
-			local lower = string.lower(tostring(name))
-			if type(fn) == "function" and (string.find(lower, "break", 1, true) or string.find(lower, "hit", 1, true) or string.find(lower, "damage", 1, true)) then
-				pcall(fn, breaker, ref, part.Position, Vector3.yAxis)
-				pcall(fn, breaker, part, part.Position, Vector3.yAxis)
-			end
-		end
-	end
-	if BW.client then
-		local names = { BW.breakRemote, "DamageBlock", "BlockDamage" }
-		for i = 1, 3 do
-			for _, name in ipairs(names) do
-				if type(name) == "string" and name ~= "" then
-					pcall(function()
-						local remote = BW.client:Get(name)
-						if remote and remote.SendToServer then
-							remote:SendToServer(payload)
-						end
-					end)
+		if not breakFn then
+			for name, fn in pairs(breaker) do
+				local lower = string.lower(tostring(name))
+				if type(fn) == "function" and (lower == "hitblock" or lower == "breakblock" or lower == "damageblock" or string.find(lower, "hit", 1, true)) then
+					breakFn = fn
+					break
 				end
 			end
 		end
+		if breakFn then
+			pcall(breakFn, breaker, { blockPosition = blockPosition }, part.Position, Vector3.yAxis)
+			pcall(breakFn, breaker, part)
+			return
+		end
 	end
+	pcall(function()
+		ContextActionService:CallFunction("block-break", Enum.UserInputState.Begin, newproxy(true))
+	end)
 end
 
 local function collectRemotes(fn, into, seen)
@@ -696,11 +712,13 @@ local function beds()
 			add(inst)
 		end
 	end
-	if #list == 0 then
-		local map = workspace:FindFirstChild("Map") or workspace
-		for _, inst in ipairs(map:GetDescendants()) do
-			if string.find(string.lower(inst.Name), "bed", 1, true) and (inst:IsA("Model") or inst:IsA("BasePart")) then
-				add(inst)
+	if #list == 0 and os.clock() % 2 < 0.2 then
+		local map = workspace:FindFirstChild("Map")
+		if map then
+			for _, inst in ipairs(map:GetChildren()) do
+				if string.find(string.lower(inst.Name), "bed", 1, true) then
+					add(inst)
+				end
 			end
 		end
 	end
@@ -733,14 +751,24 @@ local function firePrompt(prompt)
 	end)
 end
 
+local promptCache, promptAt = {}, 0
 local function prompts(needles, range)
 	local me = root()
 	if not me then
 		return
 	end
-	for _, inst in ipairs(workspace:GetDescendants()) do
-		if inst:IsA("ProximityPrompt") then
-			local part = inst.Parent and (inst.Parent:IsA("BasePart") and inst.Parent or inst.Parent:FindFirstChildWhichIsA("BasePart", true))
+	if os.clock() - promptAt > 1.5 then
+		promptAt = os.clock()
+		promptCache = {}
+		for _, inst in ipairs(workspace:GetDescendants()) do
+			if inst:IsA("ProximityPrompt") then
+				table.insert(promptCache, inst)
+			end
+		end
+	end
+	for _, inst in ipairs(promptCache) do
+		if inst.Parent then
+			local part = inst.Parent:IsA("BasePart") and inst.Parent or inst.Parent:FindFirstChildWhichIsA("BasePart")
 			if part and (part.Position - me.Position).Magnitude <= range then
 				local s = string.lower(inst.ActionText .. inst.ObjectText .. inst.Parent.Name)
 				for _, n in ipairs(needles) do
@@ -816,10 +844,8 @@ end
 cat("Combat")
 cat("Blatant")
 cat("Render")
-cat("Utility")
 cat("World")
-cat("Inventory")
-cat("Kits")
+cat("Larping")
 
 local function opt(mod, name, kind, value, extra)
 	mod.options[name] = {
@@ -1104,13 +1130,15 @@ local function onSwing()
 end
 
 local function hookSwing()
-	if swingOrig or not BW.sword or type(BW.sword.swingSwordAtMouse) ~= "function" then
+	if not BW.sword or type(BW.sword.swingSwordAtMouse) ~= "function" then
 		return
 	end
-	swingOrig = BW.sword.swingSwordAtMouse
+	if not swingOrig then
+		swingOrig = BW.sword.swingSwordAtMouse
+	end
 	BW.sword.swingSwordAtMouse = function(...)
 		local result = swingOrig(...)
-		task.spawn(onSwing)
+		onSwing()
 		return result
 	end
 end
@@ -1217,7 +1245,7 @@ end
 local function drawESP()
 	local esp, kitEsp, kitRender = Modules.ESP, Modules.KitESP, Modules.KitRender
 	local me = root()
-	local on = esp.enabled or kitEsp.enabled or kitRender.enabled
+	local on = (esp and esp.enabled) or (kitEsp and kitEsp.enabled) or (kitRender and kitRender.enabled)
 	local range = esp.enabled and get(esp, "Range") or 400
 	local teams = esp.enabled and get(esp, "Teammates")
 	for _, plr in ipairs(Players:GetPlayers()) do
@@ -1238,7 +1266,7 @@ local function drawESP()
 		else
 			local col = colorOf(plr)
 			local kit = kitOf(plr)
-			if kitRender.enabled and kit ~= "" then
+			if kitRender and kitRender.enabled and kit ~= "" then
 				col = Color3.fromHSV(((#kit * 37) % 360) / 360, get(kitRender, "Saturation") / 100, 1)
 			end
 			e = e or {}
@@ -1248,34 +1276,34 @@ local function drawESP()
 			end
 			e.h.Adornee = model
 			e.h.FillColor, e.h.OutlineColor = col, col
-			e.h.FillTransparency = esp.enabled and (1 - get(esp, "Fill") / 100) or 0.85
-			e.h.Enabled = esp.enabled or kitRender.enabled
+			e.h.FillTransparency = esp and esp.enabled and (1 - get(esp, "Fill") / 100) or 0.85
+			e.h.Enabled = (esp and esp.enabled) or (kitRender and kitRender.enabled) or true
 			local head = model:FindFirstChild("Head") or r
 			if not e.b or not e.b.Parent then
 				e.b = bill(head)
 			end
 			e.b.Adornee = head
 			local lines, info = {}, {}
-			if not esp.enabled or get(esp, "Names") then
+			if not esp or not esp.enabled or get(esp, "Names") then
 				table.insert(lines, plr.DisplayName)
 			end
-			if esp.enabled and get(esp, "Health") then
+			if esp and esp.enabled and get(esp, "Health") then
 				table.insert(info, math.floor(healthOf(model) + 0.5) .. "hp")
 			end
-			if esp.enabled and get(esp, "Distance") then
+			if esp and esp.enabled and get(esp, "Distance") then
 				table.insert(info, math.floor((r.Position - me.Position).Magnitude + 0.5) .. "m")
 			end
 			if #info > 0 then
 				table.insert(lines, table.concat(info, "  "))
 			end
-			if kitEsp.enabled and kit ~= "" then
+			if kitEsp and kitEsp.enabled and kit ~= "" then
 				table.insert(lines, get(kitEsp, "Uppercase") and string.upper(kit) or kit)
 			end
 			local t = e.b:FindFirstChild("T")
 			if t then
 				t.TextColor3 = col
 				t.Text = table.concat(lines, "\n")
-				t.TextSize = esp.enabled and get(esp, "Text size") or 13
+				t.TextSize = esp and esp.enabled and get(esp, "Text size") or 13
 			end
 		end
 	end
@@ -1308,12 +1336,30 @@ add("Combat", "SilentAim", "Your own swings hit the best enemy in FOV", function
 	opt(m, "FOV", "slider", 120, { min = 20, max = 360, step = 10, suffix = "\u{B0}" })
 	opt(m, "Priority", "list", "Angle", { list = { "Angle", "Distance", "Health" } })
 	opt(m, "Walls", "toggle", false)
-end, refreshBypass, hookSwing, 0.5)
+end, function(on)
+	refreshBypass()
+	if on then
+		hookSwing()
+	end
+end, function()
+	if not swingOrig then
+		hookSwing()
+	end
+end, 1)
 
 add("Combat", "Reach", "Extends swings you aim yourself, no walls", function(m)
 	opt(m, "Range", "slider", 18, { min = 14, max = 22, suffix = " st" })
 	opt(m, "Only moving", "toggle", false)
-end, refreshBypass, hookSwing, 0.5)
+end, function(on)
+	refreshBypass()
+	if on then
+		hookSwing()
+	end
+end, function()
+	if not swingOrig then
+		hookSwing()
+	end
+end, 1)
 
 add("Combat", "Silent Aura", "Closet aura: visible targets in FOV, slower hits", function(m)
 	opt(m, "Range", "slider", 15, { min = 8, max = 20, suffix = " st" })
@@ -1357,57 +1403,6 @@ end, function(m)
 	return get(m, "Randomize") and base * (0.85 + math.random() * 0.3) or base
 end)
 
-add("Combat", "ProjectileAimbot", "Aims bows and throwables with lead while charging", function(m)
-	opt(m, "Range", "slider", 120, { min = 30, max = 250, step = 10, suffix = " st" })
-	opt(m, "Speed", "slider", 170, { min = 60, max = 400, step = 10 })
-	opt(m, "FOV", "slider", 120, { min = 20, max = 360, step = 10, suffix = "\u{B0}" })
-	opt(m, "Drop comp", "toggle", true)
-end, nil, function(m)
-	if handKind() ~= "projectile" or not (held(M1) or held(M2)) then
-		return
-	end
-	local _, r, d = pick(get(m, "Range"), { fov = get(m, "FOV"), visible = true, sort = "Angle" })
-	if r and cam then
-		local t = d / get(m, "Speed")
-		local aim = r.Position + r.AssemblyLinearVelocity * t
-		if get(m, "Drop comp") then
-			aim += Vector3.new(0, 0.5 * workspace.Gravity * t * t * 0.3, 0)
-		end
-		look(aim)
-	end
-end, 0)
-
-add("Combat", "Velocity", "Cuts knockback you take", function(m)
-	opt(m, "Horizontal", "slider", 0, { min = 0, max = 100, step = 5, suffix = "%" })
-	opt(m, "Vertical", "slider", 0, { min = 0, max = 100, step = 5, suffix = "%" })
-	opt(m, "Chance", "slider", 100, { min = 0, max = 100, step = 5, suffix = "%" })
-end, nil, function(m)
-	if m.hooked or not (BW.knockback and BW.knockback.applyKnockback) then
-		return
-	end
-	local old = BW.knockback.applyKnockback
-	BW.knockback.applyKnockback = function(rootp, mass, dir, kb, ...)
-		if math.random(1, 100) > get(m, "Chance") then
-			return old(rootp, mass, dir, kb, ...)
-		end
-		local h, v = get(m, "Horizontal") / 100, get(m, "Vertical") / 100
-		if h == 0 and v == 0 then
-			return
-		end
-		kb = kb or {}
-		kb.horizontal = (kb.horizontal or 1) * h
-		kb.vertical = (kb.vertical or 1) * v
-		return old(rootp, mass, dir, kb, ...)
-	end
-	m.hooked = true
-	table.insert(m.conns, {
-		Disconnect = function()
-			BW.knockback.applyKnockback = old
-			m.hooked = false
-		end,
-	})
-end, 0.5)
-
 add("Combat", "Sprint", "Always sprints", nil, nil, function()
 	if BW.sprint and BW.sprint.startSprinting then
 		pcall(BW.sprint.startSprinting, BW.sprint)
@@ -1426,9 +1421,11 @@ add("Blatant", "Killaura", "Hits everyone around you, through walls, with reach"
 end, function(on, m)
 	setWalls(on and get(m, "Walls"))
 	refreshBypass()
+	if on then
+		hookSwing()
+	end
 end, function(m)
 	local walls = get(m, "Walls")
-	setWalls(walls)
 	local cfg = { switch = get(m, "Auto switch"), swing = get(m, "Swing") }
 	local mode = walls and "walls" or "silent"
 	if get(m, "Multi target") then
@@ -1463,66 +1460,12 @@ add("Blatant", "Fly", "WASD fly, Space up, Shift down", function(m)
 	opt(m, "Speed", "slider", 60, { min = 20, max = 140, step = 2 })
 	opt(m, "Vertical", "slider", 45, { min = 10, max = 120, step = 5 })
 end, function(on)
-	if not on and not Modules.InfiniteFly.enabled then
+	if not on then
 		stopFly()
 	end
 end, function(m)
 	flyStep(get(m, "Speed"), get(m, "Vertical"))
 end, 0)
-
-add("Blatant", "InfiniteFly", "Fly that dips every few seconds to reset air time", function(m)
-	opt(m, "Speed", "slider", 60, { min = 20, max = 140, step = 2 })
-	opt(m, "Vertical", "slider", 45, { min = 10, max = 120, step = 5 })
-	opt(m, "Dip every", "slider", 2, { min = 1, max = 6, suffix = "s" })
-end, function(on, m)
-	m.t = 0
-	if not on and not Modules.Fly.enabled then
-		stopFly()
-	end
-end, function(m)
-	m.t = (m.t or 0) + 1 / 60
-	flyStep(get(m, "Speed"), get(m, "Vertical"))
-	if m.t >= get(m, "Dip every") then
-		m.t = 0
-		if flyVel then
-			flyVel.VectorVelocity = Vector3.new(flyVel.VectorVelocity.X, -60, flyVel.VectorVelocity.Z)
-		end
-	end
-end, 0)
-
-add("Blatant", "LongJumps", "Launches you forward when you jump", function(m)
-	opt(m, "Boost", "slider", 60, { min = 20, max = 140, step = 5 })
-	opt(m, "Height", "slider", 10, { min = 0, max = 60, step = 5 })
-end, nil, function(m)
-	local h, r = hum(), root()
-	if not h or not r then
-		return
-	end
-	local j = h:GetState() == Enum.HumanoidStateType.Jumping
-	if j and not jumpWas then
-		local dir = h.MoveDirection.Magnitude > 0 and h.MoveDirection or Vector3.new(r.CFrame.LookVector.X, 0, r.CFrame.LookVector.Z)
-		if dir.Magnitude > 0 then
-			r.AssemblyLinearVelocity += dir.Unit * get(m, "Boost") + Vector3.new(0, get(m, "Height"), 0)
-		end
-	end
-	jumpWas = j
-end, 0)
-
-add("Blatant", "HighJump", "Raises jump power", function(m)
-	opt(m, "Power", "slider", 80, { min = 50, max = 160, step = 5 })
-end, function(on)
-	local h = hum()
-	if h and not on then
-		h.UseJumpPower = true
-		h.JumpPower = 50
-	end
-end, function(m)
-	local h = hum()
-	if h then
-		h.UseJumpPower = true
-		h.JumpPower = get(m, "Power")
-	end
-end, 0.25)
 
 add("Blatant", "InfiniteJumps", "Jump again in mid air", function(m)
 	opt(m, "Boost", "slider", 50, { min = 30, max = 120, step = 5 })
@@ -1575,25 +1518,6 @@ end, function(m)
 		r.AssemblyLinearVelocity = Vector3.new(v.X, r.AssemblyLinearVelocity.Y, v.Z)
 	end
 end, 0)
-
-add("Blatant", "Desync", "Jitters your server position forward", function(m)
-	opt(m, "Distance", "slider", 6, { min = 2, max = 12, suffix = " st" })
-	opt(m, "Delay", "slider", 200, { min = 50, max = 1000, step = 50, suffix = "ms" })
-end, nil, function(m)
-	local r = root()
-	if not r then
-		return
-	end
-	local cf = r.CFrame
-	r.CFrame = cf * CFrame.new(0, 0, -get(m, "Distance"))
-	task.defer(function()
-		if r.Parent then
-			r.CFrame = cf
-		end
-	end)
-end, function(m)
-	return get(m, "Delay") / 1000
-end)
 
 add("Render", "ESP", "Outlines and tags enemies", function(m)
 	opt(m, "Range", "slider", 300, { min = 50, max = 1000, step = 50, suffix = " st" })
@@ -1659,200 +1583,257 @@ end, function()
 	drawESP()
 end, drawESP, 0.15)
 
-add("Render", "KitRender", "Colors ESP by kit", function(m)
-	opt(m, "Saturation", "slider", 55, { min = 10, max = 100, step = 5, suffix = "%" })
-end, function()
-	drawESP()
-end, drawESP, 0.15)
-
-add("Render", "SkinChanger", "Recolors your character (client side)", function(m)
-	opt(m, "Hue", "slider", 28, { min = 0, max = 360, step = 4, suffix = "\u{B0}" })
-	opt(m, "Material", "list", "Keep", { list = { "Keep", "Neon", "ForceField", "SmoothPlastic", "Glass" } })
-end, function(on, m)
-	if not on then
-		for p, saved in pairs(m.saved or {}) do
-			if p.Parent then
-				p.Color, p.Material = saved[1], saved[2]
-			end
-		end
-		m.saved = {}
-	end
-end, function(m)
-	local c = char()
-	if not c then
-		return
-	end
-	m.saved = m.saved or {}
-	local col = Color3.fromHSV(get(m, "Hue") / 360, 0.55, 1)
-	local mat = get(m, "Material")
-	for _, p in ipairs(c:GetDescendants()) do
-		if p:IsA("BasePart") and p.Name ~= "HumanoidRootPart" then
-			m.saved[p] = m.saved[p] or { p.Color, p.Material }
-			p.Color = col
-			if mat ~= "Keep" then
-				p.Material = Enum.Material[mat]
-			end
-		end
-	end
-end, 0.5)
-
-add("Render", "FPSBooster", "Lowers quality for more frames", function(m)
-	opt(m, "Shadows off", "toggle", true)
-	opt(m, "Particles off", "toggle", true)
-end, function(on, m)
-	pcall(function()
-		settings().Rendering.QualityLevel = on and Enum.QualityLevel.Level01 or Enum.QualityLevel.Automatic
-	end)
-	Lighting.GlobalShadows = not (on and get(m, "Shadows off"))
-	if on and get(m, "Particles off") then
-		m.fx = {}
-		for _, i in ipairs(workspace:GetDescendants()) do
-			if (i:IsA("ParticleEmitter") or i:IsA("Trail") or i:IsA("Smoke") or i:IsA("Fire")) and i.Enabled then
-				m.fx[i] = true
-				i.Enabled = false
-			end
-		end
-	elseif not on then
-		for i in pairs(m.fx or {}) do
-			if i.Parent then
-				i.Enabled = true
-			end
-		end
-		m.fx = {}
-	end
-end)
-
-add("Render", "Shaders", "Color grading and bloom", function(m)
-	opt(m, "Saturation", "slider", 15, { min = -50, max = 80, step = 5 })
-	opt(m, "Contrast", "slider", 8, { min = -20, max = 50, step = 2 })
-	opt(m, "Warmth", "slider", 30, { min = 0, max = 100, step = 5, suffix = "%" })
-	opt(m, "Bloom", "toggle", true)
-end, function(on)
-	for _, f in ipairs(shader or {}) do
-		f:Destroy()
-	end
-	shader = {}
-	if on then
-		local cc = Instance.new("ColorCorrectionEffect")
-		cc.Parent = Lighting
-		local bloom = Instance.new("BloomEffect")
-		bloom.Intensity, bloom.Size, bloom.Threshold = 0.6, 24, 1.6
-		bloom.Parent = Lighting
-		shader = { cc, bloom }
-	end
-end, function(m)
-	local cc, bloom = shader and shader[1], shader and shader[2]
-	if cc then
-		cc.Saturation = get(m, "Saturation") / 100
-		cc.Contrast = get(m, "Contrast") / 100
-		local w = get(m, "Warmth") / 100
-		cc.TintColor = Color3.new(1, 1 - w * 0.12, 1 - w * 0.2)
-	end
-	if bloom then
-		bloom.Enabled = get(m, "Bloom")
-	end
-end, 0.2)
-
-add("Render", "NoTexture", "Flattens every material", nil, function(on, m)
-	if on then
-		tex = {}
-		local function strip(i)
-			if i:IsA("BasePart") and not tex[i] then
-				tex[i] = i.Material
-				i.Material = Enum.Material.SmoothPlastic
-			end
-		end
-		for _, i in ipairs(workspace:GetDescendants()) do
-			strip(i)
-		end
-		table.insert(m.conns, workspace.DescendantAdded:Connect(strip))
-	else
-		for i, mat in pairs(tex or {}) do
-			if i.Parent then
-				i.Material = mat
-			end
-		end
-		tex = {}
-	end
-end)
-
 add("Render", "TargetInfo", "Shows your closest target", function(m)
 	opt(m, "Range", "slider", 24, { min = 8, max = 60, suffix = " st" })
 end)
 
-add("Utility", "AutoWin", "Walks the bed break: defense first, then the bed", function(m)
-	opt(m, "Range", "slider", 30, { min = 10, max = 40, suffix = " st" })
-	opt(m, "Auto tool", "toggle", true)
-end, nil, function(m)
-	breakBedStep(get(m, "Range"), true, get(m, "Auto tool"))
-end, 0.06)
+local RANK_LIST = {
+	"Bronze 1", "Bronze 2", "Bronze 3", "Bronze 4",
+	"Silver 1", "Silver 2", "Silver 3", "Silver 4",
+	"Gold 1", "Gold 2", "Gold 3", "Gold 4",
+	"Platinum 1", "Platinum 2", "Platinum 3", "Platinum 4",
+	"Diamond 1", "Diamond 2", "Diamond 3",
+	"Emerald",
+	"Nightmare",
+}
 
-add("Utility", "AntiLasso", "Breaks lasso pulls on you", nil, nil, function()
-	local c = char()
-	if not c then
-		return
-	end
-	for _, i in ipairs(c:GetDescendants()) do
-		if i:IsA("Constraint") and not i:IsA("Motor6D") and i ~= flyVel then
-			pcall(function()
-				i.Enabled = false
-			end)
-		end
-	end
-end, 0.1)
+local RANK_COLOR = {
+	Bronze = Color3.fromRGB(205, 127, 50),
+	Silver = Color3.fromRGB(192, 192, 208),
+	Gold = Color3.fromRGB(255, 200, 50),
+	Platinum = Color3.fromRGB(70, 220, 200),
+	Diamond = Color3.fromRGB(80, 180, 255),
+	Emerald = Color3.fromRGB(50, 220, 120),
+	Nightmare = Color3.fromRGB(160, 70, 255),
+}
 
-add("Utility", "AutoLasso", "Swings at enemies while you have a lasso kit", function(m)
-	opt(m, "Range", "slider", 30, { min = 10, max = 40, suffix = " st" })
-end, nil, function(m)
-	if string.find(string.lower(kitOf(lp)), "lasso", 1, true) then
-		local t, r = pick(get(m, "Range"), { visible = true })
-		if t then
-			sendAttack(t, r, "silent")
-		end
+local function rankNeed(rank)
+	if rank == "Emerald" or rank == "Nightmare" then
+		return 100
 	end
-end, 0.3)
+	return 100
+end
 
-add("Utility", "AutoKit", "Fires your kit ability near enemies", function(m)
-	opt(m, "Range", "slider", 20, { min = 6, max = 40, suffix = " st" })
-end, nil, function(m)
-	if not pick(get(m, "Range")) then
-		return
+local function rankTier(rank)
+	return (string.match(rank, "^(%a+)") or rank)
+end
+
+local nmFolder
+local nmNeck
+local function stopNm()
+	if nmFolder then
+		nmFolder:Destroy()
+		nmFolder = nil
 	end
-	local ctrls = BW.knit and BW.knit.Controllers
-	local kit = ctrls and (ctrls.AbilityController or ctrls.KitAbilityController)
-	if kit then
-		for _, n in ipairs({ "useAbility", "activateAbility" }) do
-			if type(kit[n]) == "function" then
-				pcall(kit[n], kit)
+	if nmNeck then
+		pcall(function()
+			nmNeck.j.C0 = nmNeck.c0
+		end)
+		nmNeck = nil
+	end
+end
+
+local function hideEmoteWheel()
+	for _, gui in ipairs({ lp:FindFirstChild("PlayerGui"), parentGui() }) do
+		if gui then
+			for _, inst in ipairs(gui:GetDescendants()) do
+				local n = string.lower(inst.Name)
+				if inst:IsA("GuiObject") and inst.Visible and inst.Name ~= "Quantumware" then
+					if string.find(n, "emote", 1, true) or string.find(n, "radial", 1, true) or string.find(n, "wheel", 1, true) then
+						local top = inst
+						while top.Parent and top.Parent:IsA("GuiObject") do
+							top = top.Parent
+						end
+						if top.Name ~= "Quantumware" then
+							inst.Visible = false
+						end
+					end
+				end
 			end
 		end
 	end
-end, 0.25)
+end
 
-add("Utility", "ChestSteal", "Opens chests you walk near", function(m)
-	opt(m, "Range", "slider", 12, { min = 4, max = 24, suffix = " st" })
-end, nil, function(m)
-	prompts({ "chest", "loot", "open" }, get(m, "Range"))
-end, 0.3)
+local function fireNmRemote()
+	if BW.emote then
+		for _, fn in ipairs({ "playEmote", "useEmote", "play", "PlayEmote" }) do
+			if type(BW.emote[fn]) == "function" then
+				pcall(BW.emote[fn], BW.emote, "nightmare")
+				break
+			end
+		end
+		if not BW.emoteRemote then
+			for _, fn in pairs(BW.emote) do
+				if type(fn) == "function" and not BW.emoteRemote then
+					BW.emoteRemote = dumpRemote(fn)
+				end
+			end
+		end
+	end
+	if BW.client and BW.emoteRemote then
+		pcall(function()
+			BW.client:Get(BW.emoteRemote):SendToServer({ emoteType = "nightmare" })
+		end)
+	end
+end
 
-add("Utility", "FastPlace", "Places blocks fast while you hold M2", function(m)
-	opt(m, "Delay", "slider", 40, { min = 10, max = 200, step = 5, suffix = "ms" })
-end, nil, function()
-	if not held(M2) then
+local function weldPart(parent, rootp, size, offset, color)
+	local p = Instance.new("Part")
+	p.Anchored = false
+	p.CanCollide = false
+	p.CanQuery = false
+	p.Massless = true
+	p.Material = Enum.Material.Neon
+	p.Color = color
+	p.Size = size
+	p.CFrame = rootp.CFrame * offset
+	p.Parent = parent
+	local w = Instance.new("WeldConstraint")
+	w.Part0 = rootp
+	w.Part1 = p
+	w.Parent = p
+	return p
+end
+
+local function startNm()
+	stopNm()
+	hideEmoteWheel()
+	fireNmRemote()
+	local c, r, h = char(), root(), hum()
+	if not c or not r then
 		return
 	end
-	if handKind() == "block" and blockPlacer() then
-		task.spawn(placeGrid, mouseGrid())
+	nmFolder = Instance.new("Folder")
+	nmFolder.Name = "QW_NM"
+	nmFolder.Parent = c
+	local beam = weldPart(nmFolder, r, Vector3.new(0.22, 16, 0.22), CFrame.new(0, 8, 0), Color3.fromRGB(255, 210, 90))
+	local light = Instance.new("PointLight")
+	light.Color = Color3.fromRGB(255, 210, 90)
+	light.Brightness = 4
+	light.Range = 18
+	light.Parent = beam
+	weldPart(nmFolder, r, Vector3.new(0.7, 0.7, 0.7), CFrame.new(0, 15.5, 0), Color3.fromRGB(255, 190, 60)).Shape = Enum.PartType.Ball
+	local aura = weldPart(nmFolder, r, Vector3.new(4.2, 7.5, 4.2), CFrame.new(0, 2.2, 0), Color3.fromRGB(20, 16, 40))
+	aura.Transparency = 0.72
+	aura.Material = Enum.Material.ForceField
+	local neck = c:FindFirstChild("Neck", true)
+	if neck and neck:IsA("Motor6D") then
+		nmNeck = { j = neck, c0 = neck.C0 }
+		neck.C0 = neck.C0 * CFrame.Angles(-math.rad(55), 0, 0)
+	end
+	if h then
+		h.AutoRotate = false
+	end
+end
+
+local statsOrig = {}
+local function applyFakeStats(m)
+	local name = get(m, "Name")
+	local rank = get(m, "Rank")
+	local rp = get(m, "RP")
+	local lb = tonumber(get(m, "Leaderboard")) or 1
+	local need = rankNeed(rank)
+	local tier = rankTier(rank)
+	local col = RANK_COLOR[tier] or Color3.fromRGB(70, 220, 200)
+	pcall(function()
+		lp.DisplayName = name
+	end)
+	local h = hum()
+	if h then
+		pcall(function()
+			h.DisplayName = name
+		end)
+	end
+	if BW.store then
+		pcall(function()
+			BW.store:dispatch({
+				type = "SetRankedData",
+				rank = rank,
+				rp = rp,
+				leaderboardRank = lb,
+			})
+		end)
+	end
+	local function touch(gui)
+		if not gui then
+			return
+		end
+		for _, inst in ipairs(gui:GetDescendants()) do
+			if inst:IsA("TextLabel") or inst:IsA("TextButton") then
+				local t = inst.Text
+				if t == "" or inst:IsDescendantOf(screen) then
+					-- skip
+				else
+					if not statsOrig[inst] then
+						statsOrig[inst] = t
+					end
+					if string.find(t, "Leaderboard Rank", 1, true) then
+						inst.Text = "Leaderboard Rank: " .. tostring(lb):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
+					elseif string.find(t, " RP / ", 1, true) or string.match(t, "^%d+%s*RP") then
+						inst.Text = tostring(rp) .. " RP / " .. tostring(need)
+					elseif string.match(t, "^Platinum%s%d") or string.match(t, "^Bronze%s%d") or string.match(t, "^Silver%s%d") or string.match(t, "^Gold%s%d") or string.match(t, "^Diamond%s%d") or t == "Emerald" or t == "Nightmare" then
+						inst.Text = rank
+						inst.TextColor3 = col
+					elseif t == lp.Name or t == statsOrig[inst] and (string.find(statsOrig[inst], lp.Name, 1, true) or statsOrig[inst] == lp.DisplayName) then
+						if t == lp.Name or t == lp.DisplayName or statsOrig[inst] == lp.Name then
+							inst.Text = name
+						end
+					end
+				end
+			elseif inst:IsA("GuiObject") and (inst.Name == "Fill" or inst.Name == "Bar" or inst.Name == "Progress") then
+				pcall(function()
+					inst.Size = UDim2.new(math.clamp(rp / need, 0, 1), 0, inst.Size.Y.Scale, inst.Size.Y.Offset)
+				end)
+			end
+		end
+	end
+	touch(lp:FindFirstChild("PlayerGui"))
+end
+
+add("Larping", "Fake NM Emote", "Nightmare pose and aura, no picker wheel. Fires the emote remote", function(m)
+	opt(m, "Aura", "toggle", true)
+end, function(on)
+	if on then
+		startNm()
 	else
-		click(1)
+		stopNm()
+		local h = hum()
+		if h then
+			h.AutoRotate = true
+		end
 	end
 end, function(m)
-	return get(m, "Delay") / 1000
-end)
+	if not nmFolder or not nmFolder.Parent then
+		if get(m, "Aura") then
+			startNm()
+		end
+	end
+	hideEmoteWheel()
+end, 0.4)
+
+add("Larping", "Fake Stats", "Spoofs your name, ranked division, RP bar, and leaderboard #", function(m)
+	opt(m, "Name", "text", lp.DisplayName or lp.Name)
+	opt(m, "Rank", "list", "Platinum 4", { list = RANK_LIST })
+	opt(m, "RP", "slider", 20, { min = 0, max = 100, suffix = " RP" })
+	opt(m, "Leaderboard", "text", "1880")
+end, function(on)
+	if not on then
+		for inst, t in pairs(statsOrig) do
+			if inst.Parent then
+				pcall(function()
+					inst.Text = t
+				end)
+			end
+		end
+		statsOrig = {}
+	end
+end, function(m)
+	applyFakeStats(m)
+end, 0.35)
 
 add("World", "Nuker", "Fast-breaks bed defense, then the bed", function(m)
 	opt(m, "Range", "slider", 30, { min = 10, max = 40, suffix = " st" })
-	opt(m, "Delay", "slider", 50, { min = 10, max = 300, step = 10, suffix = "ms" })
+	opt(m, "Delay", "slider", 80, { min = 40, max = 300, step = 10, suffix = "ms" })
 	opt(m, "Defense first", "toggle", true)
 	opt(m, "Auto tool", "toggle", true)
 end, nil, function(m)
@@ -1860,97 +1841,6 @@ end, nil, function(m)
 end, function(m)
 	return get(m, "Delay") / 1000
 end)
-
-add("World", "BlockIn", "Boxes you in with blocks", function(m)
-	opt(m, "Roof", "toggle", true)
-	opt(m, "Floor", "toggle", true)
-	opt(m, "Delay", "slider", 350, { min = 100, max = 1500, step = 50, suffix = "ms" })
-end, nil, function(m)
-	local r = root()
-	if not r or not equipBlock() then
-		return
-	end
-	local base = Vector3.new(math.round(r.Position.X / 3), math.round((r.Position.Y - 1.5) / 3), math.round(r.Position.Z / 3))
-	local spots = {}
-	for _, o in ipairs({ Vector3.new(1, 0, 0), Vector3.new(-1, 0, 0), Vector3.new(0, 0, 1), Vector3.new(0, 0, -1) }) do
-		table.insert(spots, base + o)
-		table.insert(spots, base + o + Vector3.yAxis)
-	end
-	if get(m, "Roof") then
-		table.insert(spots, base + Vector3.new(0, 2, 0))
-	end
-	if get(m, "Floor") then
-		table.insert(spots, base - Vector3.yAxis)
-	end
-	for _, g in ipairs(spots) do
-		task.spawn(placeGrid, g)
-	end
-end, function(m)
-	return get(m, "Delay") / 1000
-end)
-
-add("Inventory", "AutoBank", "Uses bank and shop prompts near you", function(m)
-	opt(m, "Range", "slider", 16, { min = 4, max = 30, suffix = " st" })
-end, nil, function(m)
-	prompts({ "bank", "shop", "upgrade", "deposit" }, get(m, "Range"))
-end, 0.4)
-
-local KIT = {
-	AutoCait = { "cait" },
-	AutoNyx = { "nyx" },
-	AutoElder = { "elder" },
-	AutoSilas = { "silas" },
-	AutoKadia = { "kadia", "kaida" },
-	AutoRaven = { "raven" },
-	AutoVoidNight = { "void" },
-	AutoHep = { "hep", "heph" },
-	AutoAdetunde = { "adetunde" },
-	AutoBountyHunter = { "bounty" },
-	AutoLucia = { "lucia" },
-	AutoAbbadon = { "abaddon", "abbadon" },
-	AutoFortuna = { "fortuna" },
-	AutoDavey = { "davey" },
-	AutoGrim = { "grim" },
-	AutoKalliyah = { "kaliyah", "kalliyah" },
-	AutoBuilder = { "builder" },
-	AutoFish = { "fish" },
-	AutoKrystal = { "krystal" },
-}
-
-local function kitOn(keys)
-	local k = string.lower(kitOf(lp))
-	for _, s in ipairs(keys) do
-		if string.find(k, s, 1, true) then
-			return true
-		end
-	end
-end
-
-local kitNames = {}
-for name in pairs(KIT) do
-	table.insert(kitNames, name)
-end
-table.sort(kitNames)
-
-for _, name in ipairs(kitNames) do
-	local keys = KIT[name]
-	add("Kits", name, "Runs only when you have this kit", function(m)
-		opt(m, "Range", "slider", 18, { min = 6, max = 22, suffix = " st" })
-		opt(m, "Walls", "toggle", false)
-	end, nil, function(m)
-		if not kitOn(keys) then
-			return
-		end
-		local walls = get(m, "Walls")
-		local t, r = pick(get(m, "Range"), { visible = not walls })
-		if t then
-			sendAttack(t, r, walls and "walls" or "silent")
-		end
-		if name == "AutoBuilder" and Modules.BlockIn then
-			Modules.BlockIn.tick(Modules.BlockIn)
-		end
-	end, 0.2)
-end
 
 local function glass(inst)
 	pcall(function()
@@ -2013,7 +1903,7 @@ menu.Size = UDim2.fromScale(1, 1)
 menu.Parent = overlay
 
 local COL_W, COL_GAP = 176, 12
-local COLS = { "Combat", "Blatant", "Render", "Utility", "World", "Inventory", "Kits" }
+local COLS = { "Combat", "Blatant", "Render", "World", "Larping" }
 local boardW = #COLS * COL_W + (#COLS - 1) * COL_GAP
 
 local bar = Instance.new("Frame")
@@ -2359,6 +2249,33 @@ local function choiceRow(o, order, isBind)
 	paint()
 end
 
+local function textRow(o, order)
+	local hold = Instance.new("Frame")
+	hold.BackgroundTransparency = 1
+	hold.Size = UDim2.new(1, 0, 0, 44)
+	hold.LayoutOrder = order
+	hold.Parent = panel
+	local name = label(hold, o.name, 12, TXT)
+	name.Size = UDim2.new(1, 0, 0, 14)
+	local box = Instance.new("TextBox")
+	box.Size = UDim2.new(1, 0, 0, 24)
+	box.Position = UDim2.fromOffset(0, 18)
+	box.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	box.BackgroundTransparency = 0.9
+	box.Font = Enum.Font.Gotham
+	box.TextSize = 12
+	box.TextColor3 = TXT
+	box.PlaceholderColor3 = DIM
+	box.PlaceholderText = o.name
+	box.Text = tostring(o.value or "")
+	box.ClearTextOnFocus = false
+	box.Parent = hold
+	corner(box, 6)
+	box.FocusLost:Connect(function()
+		o.value = box.Text
+	end)
+end
+
 local function closePanel()
 	if panelMod then
 		for _, c in ipairs(panelMod.uiConns or {}) do
@@ -2425,6 +2342,8 @@ local function openPanel(mod, anchor)
 			choiceRow(o, order, false)
 		elseif o.kind == "bind" then
 			choiceRow(o, order, true)
+		elseif o.kind == "text" then
+			textRow(o, order)
 		end
 	end
 	local view = cam and cam.ViewportSize or Vector2.new(1920, 1080)
