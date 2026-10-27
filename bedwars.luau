@@ -1618,87 +1618,158 @@ local function rankTier(rank)
 	return (string.match(rank, "^(%a+)") or rank)
 end
 
-local nmFolder
-local nmNeck
+local nmFolder, nmTrack, nmBound
+local function holdNmPose()
+	local c = char()
+	if not c then
+		return
+	end
+	local neck = c:FindFirstChild("Neck", true)
+	local waist = c:FindFirstChild("Waist", true)
+	if neck and neck:IsA("Motor6D") then
+		neck.Transform = CFrame.Angles(-math.rad(78), 0, 0)
+	end
+	if waist and waist:IsA("Motor6D") then
+		waist.Transform = CFrame.Angles(-math.rad(22), 0, 0)
+	end
+end
+
 local function stopNm()
+	if nmBound then
+		pcall(function()
+			RunService:UnbindFromRenderStep("QW_NMPose")
+		end)
+		nmBound = false
+	end
+	if nmTrack then
+		pcall(function()
+			nmTrack:Stop()
+		end)
+		nmTrack = nil
+	end
 	if nmFolder then
 		nmFolder:Destroy()
 		nmFolder = nil
 	end
-	if nmNeck then
-		pcall(function()
-			nmNeck.j.C0 = nmNeck.c0
-		end)
-		nmNeck = nil
+	local c = char()
+	if c then
+		local neck = c:FindFirstChild("Neck", true)
+		local waist = c:FindFirstChild("Waist", true)
+		if neck and neck:IsA("Motor6D") then
+			neck.Transform = CFrame.new()
+		end
+		if waist and waist:IsA("Motor6D") then
+			waist.Transform = CFrame.new()
+		end
+	end
+	local h = hum()
+	if h then
+		h.AutoRotate = true
 	end
 end
 
 local function hideEmoteWheel()
-	for _, gui in ipairs({ lp:FindFirstChild("PlayerGui"), parentGui() }) do
-		if gui then
-			for _, inst in ipairs(gui:GetDescendants()) do
-				local n = string.lower(inst.Name)
-				if inst:IsA("GuiObject") and inst.Visible and inst.Name ~= "Quantumware" then
-					if string.find(n, "emote", 1, true) or string.find(n, "radial", 1, true) or string.find(n, "wheel", 1, true) then
-						local top = inst
-						while top.Parent and top.Parent:IsA("GuiObject") do
-							top = top.Parent
-						end
-						if top.Name ~= "Quantumware" then
-							inst.Visible = false
-						end
-					end
-				end
-			end
+	local gui = lp:FindFirstChild("PlayerGui")
+	if not gui then
+		return
+	end
+	for _, inst in ipairs(gui:GetChildren()) do
+		local n = string.lower(inst.Name)
+		if inst:IsA("ScreenGui") and inst.Name ~= "Quantumware" and (string.find(n, "emote", 1, true) or string.find(n, "radial", 1, true)) then
+			inst.Enabled = false
 		end
 	end
 end
 
-local function fireNmRemote()
-	if BW.emote then
+local function playOfficialNm()
+	local h = hum()
+	if not h then
+		return
+	end
+	local anim
+	pcall(function()
+		for _, d in ipairs(ReplicatedStorage:GetDescendants()) do
+			if d:IsA("Animation") and string.find(string.lower(d.Name), "night", 1, true) then
+				anim = d
+				break
+			end
+		end
+	end)
+	if anim then
+		local ok, track = pcall(function()
+			return h:LoadAnimation(anim)
+		end)
+		if ok and track then
+			track.Looped = true
+			track.Priority = Enum.AnimationPriority.Action4
+			track:Play(0.1, 1, 1)
+			nmTrack = track
+		end
+	end
+	local ctrl = BW.emote
+	if not ctrl and BW.knit and BW.knit.Controllers then
+		for name, c in pairs(BW.knit.Controllers) do
+			if string.find(string.lower(tostring(name)), "emote", 1, true) then
+				ctrl = c
+				BW.emote = c
+				break
+			end
+		end
+	end
+	if ctrl then
 		for _, fn in ipairs({ "playEmote", "useEmote", "play", "PlayEmote" }) do
-			if type(BW.emote[fn]) == "function" then
-				pcall(BW.emote[fn], BW.emote, "nightmare")
+			if type(ctrl[fn]) == "function" then
+				pcall(ctrl[fn], ctrl, "nightmare")
 				break
 			end
 		end
 		if not BW.emoteRemote then
-			for _, fn in pairs(BW.emote) do
-				if type(fn) == "function" and not BW.emoteRemote then
+			for _, fn in pairs(ctrl) do
+				if type(fn) == "function" then
 					BW.emoteRemote = dumpRemote(fn)
+					if BW.emoteRemote then
+						break
+					end
 				end
 			end
 		end
 	end
 	if BW.client and BW.emoteRemote then
 		pcall(function()
-			BW.client:Get(BW.emoteRemote):SendToServer({ emoteType = "nightmare" })
+			local rem = BW.client:Get(BW.emoteRemote)
+			rem:SendToServer({ emote = "nightmare" })
 		end)
 	end
 end
 
-local function weldPart(parent, rootp, size, offset, color)
+local function weldPart(parent, rootp, size, offset, color, shape)
 	local p = Instance.new("Part")
 	p.Anchored = false
 	p.CanCollide = false
 	p.CanQuery = false
+	p.CanTouch = false
 	p.Massless = true
+	p.CastShadow = false
 	p.Material = Enum.Material.Neon
 	p.Color = color
 	p.Size = size
+	if shape then
+		p.Shape = shape
+	end
 	p.CFrame = rootp.CFrame * offset
 	p.Parent = parent
 	local w = Instance.new("WeldConstraint")
 	w.Part0 = rootp
 	w.Part1 = p
 	w.Parent = p
+	p.CFrame = rootp.CFrame * offset
 	return p
 end
 
 local function startNm()
 	stopNm()
 	hideEmoteWheel()
-	fireNmRemote()
+	playOfficialNm()
 	local c, r, h = char(), root(), hum()
 	if not c or not r then
 		return
@@ -1706,88 +1777,167 @@ local function startNm()
 	nmFolder = Instance.new("Folder")
 	nmFolder.Name = "QW_NM"
 	nmFolder.Parent = c
-	local beam = weldPart(nmFolder, r, Vector3.new(0.22, 16, 0.22), CFrame.new(0, 8, 0), Color3.fromRGB(255, 210, 90))
+	local disc = weldPart(nmFolder, r, Vector3.new(0.28, 7.2, 7.2), CFrame.new(0, 6.3, -0.2) * CFrame.Angles(0, 0, math.rad(90)), Color3.fromRGB(10, 12, 20), Enum.PartType.Cylinder)
+	disc.Material = Enum.Material.SmoothPlastic
+	local slice = weldPart(nmFolder, r, Vector3.new(0.34, 3.3, 3.3), CFrame.new(-1.35, 6.45, -0.15) * CFrame.Angles(0, 0, math.rad(90)), Color3.fromRGB(245, 246, 252), Enum.PartType.Cylinder)
+	slice.Material = Enum.Material.Neon
+	local beam = weldPart(nmFolder, r, Vector3.new(0.16, 9.5, 0.16), CFrame.new(0, 7.2, -0.2), Color3.fromRGB(255, 214, 70))
+	local tip = weldPart(nmFolder, r, Vector3.new(0.45, 0.9, 0.45), CFrame.new(0, 12.1, -0.2), Color3.fromRGB(255, 230, 120), Enum.PartType.Ball)
 	local light = Instance.new("PointLight")
-	light.Color = Color3.fromRGB(255, 210, 90)
-	light.Brightness = 4
-	light.Range = 18
+	light.Color = Color3.fromRGB(255, 210, 80)
+	light.Brightness = 3
+	light.Range = 16
 	light.Parent = beam
-	weldPart(nmFolder, r, Vector3.new(0.7, 0.7, 0.7), CFrame.new(0, 15.5, 0), Color3.fromRGB(255, 190, 60)).Shape = Enum.PartType.Ball
-	local aura = weldPart(nmFolder, r, Vector3.new(4.2, 7.5, 4.2), CFrame.new(0, 2.2, 0), Color3.fromRGB(20, 16, 40))
-	aura.Transparency = 0.72
-	aura.Material = Enum.Material.ForceField
-	local neck = c:FindFirstChild("Neck", true)
-	if neck and neck:IsA("Motor6D") then
-		nmNeck = { j = neck, c0 = neck.C0 }
-		neck.C0 = neck.C0 * CFrame.Angles(-math.rad(55), 0, 0)
-	end
+	weldPart(nmFolder, r, Vector3.new(0.55, 0.55, 0.55), CFrame.new(2.5, 8.4, -0.3), Color3.fromRGB(255, 70, 50), Enum.PartType.Ball)
+	weldPart(nmFolder, r, Vector3.new(0.28, 0.28, 0.28), CFrame.new(2.15, 8.9, -0.2), Color3.fromRGB(255, 210, 60), Enum.PartType.Ball)
+	weldPart(nmFolder, r, Vector3.new(0.22, 0.22, 0.22), CFrame.new(2.85, 8.05, -0.15), Color3.fromRGB(255, 180, 40), Enum.PartType.Ball)
 	if h then
 		h.AutoRotate = false
+	end
+	if not nmBound then
+		nmBound = true
+		RunService:BindToRenderStep("QW_NMPose", Enum.RenderPriority.Last.Value, holdNmPose)
 	end
 end
 
 local statsOrig = {}
-local function applyFakeStats(m)
-	local name = get(m, "Name")
-	local rank = get(m, "Rank")
-	local rp = get(m, "RP")
-	local lb = tonumber(get(m, "Leaderboard")) or 1
-	local need = rankNeed(rank)
-	local tier = rankTier(rank)
-	local col = RANK_COLOR[tier] or Color3.fromRGB(70, 220, 200)
-	pcall(function()
-		lp.DisplayName = name
-	end)
-	local h = hum()
-	if h then
-		pcall(function()
-			h.DisplayName = name
-		end)
+local statsHooked = {}
+local realUser, realDisplay
+local rankWords = { "Nightmare", "Emerald", "Diamond", "Platinum", "Gold", "Silver", "Bronze" }
+
+local function plainReplace(s, old, new)
+	if not old or old == "" or old == new or not string.find(s, old, 1, true) then
+		return s
 	end
-	if BW.store then
-		pcall(function()
-			BW.store:dispatch({
-				type = "SetRankedData",
-				rank = rank,
-				rp = rp,
-				leaderboardRank = lb,
-			})
-		end)
-	end
-	local function touch(gui)
-		if not gui then
-			return
+	local out, i = {}, 1
+	while true do
+		local a, b = string.find(s, old, i, true)
+		if not a then
+			table.insert(out, string.sub(s, i))
+			break
 		end
-		for _, inst in ipairs(gui:GetDescendants()) do
-			if inst:IsA("TextLabel") or inst:IsA("TextButton") then
-				local t = inst.Text
-				if t == "" or inst:IsDescendantOf(screen) then
-					-- skip
-				else
-					if not statsOrig[inst] then
-						statsOrig[inst] = t
-					end
-					if string.find(t, "Leaderboard Rank", 1, true) then
-						inst.Text = "Leaderboard Rank: " .. tostring(lb):reverse():gsub("(%d%d%d)", "%1,"):reverse():gsub("^,", "")
-					elseif string.find(t, " RP / ", 1, true) or string.match(t, "^%d+%s*RP") then
-						inst.Text = tostring(rp) .. " RP / " .. tostring(need)
-					elseif string.match(t, "^Platinum%s%d") or string.match(t, "^Bronze%s%d") or string.match(t, "^Silver%s%d") or string.match(t, "^Gold%s%d") or string.match(t, "^Diamond%s%d") or t == "Emerald" or t == "Nightmare" then
-						inst.Text = rank
-						inst.TextColor3 = col
-					elseif t == lp.Name or t == statsOrig[inst] and (string.find(statsOrig[inst], lp.Name, 1, true) or statsOrig[inst] == lp.DisplayName) then
-						if t == lp.Name or t == lp.DisplayName or statsOrig[inst] == lp.Name then
-							inst.Text = name
-						end
-					end
-				end
-			elseif inst:IsA("GuiObject") and (inst.Name == "Fill" or inst.Name == "Bar" or inst.Name == "Progress") then
-				pcall(function()
-					inst.Size = UDim2.new(math.clamp(rp / need, 0, 1), 0, inst.Size.Y.Scale, inst.Size.Y.Offset)
-				end)
+		table.insert(out, string.sub(s, i, a - 1))
+		table.insert(out, new)
+		i = b + 1
+	end
+	return table.concat(out)
+end
+
+local function commaNum(n)
+	local s = tostring(math.floor(tonumber(n) or 0))
+	local k
+	repeat
+		s, k = string.gsub(s, "^(-?%d+)(%d%d%d)", "%1,%2")
+	until k == 0
+	return s
+end
+
+local function rewriteStatText(t, m)
+	if type(t) ~= "string" or t == "" or #t > 90 then
+		return t
+	end
+	local name = tostring(get(m, "Name") or "")
+	local rank = tostring(get(m, "Rank") or "")
+	local rp = math.floor(tonumber(get(m, "RP")) or 0)
+	local lb = tonumber(get(m, "Leaderboard")) or 1
+	if name ~= "" then
+		t = plainReplace(t, realUser, name)
+		t = plainReplace(t, realDisplay, name)
+	end
+	if string.find(t, "Leaderboard Rank", 1, true) then
+		return "Leaderboard Rank: " .. commaNum(lb)
+	end
+	if string.find(string.lower(t), "rp", 1, true) and string.find(t, "/", 1, true) and #t < 24 then
+		return tostring(rp) .. " RP / 100"
+	end
+	local trimmed = string.match(t, "^%s*(.-)%s*$") or t
+	if #trimmed <= 16 then
+		for _, word in ipairs(rankWords) do
+			if string.find(trimmed, word, 1, true) then
+				return rank
 			end
 		end
 	end
-	touch(lp:FindFirstChild("PlayerGui"))
+	return t
+end
+
+local function ownedByUs(inst, m)
+	local gui = inst:FindFirstAncestorWhichIsA("SurfaceGui") or inst:FindFirstAncestorWhichIsA("BillboardGui") or inst:FindFirstAncestorWhichIsA("ScreenGui")
+	if not gui or gui.Name == "Quantumware" then
+		return false
+	end
+	local pg = lp:FindFirstChild("PlayerGui")
+	if pg and gui:IsDescendantOf(pg) then
+		return true
+	end
+	local fake = tostring(get(m, "Name") or "")
+	for _, d in ipairs(gui:GetDescendants()) do
+		if d:IsA("TextLabel") or d:IsA("TextButton") then
+			local tx = d.Text
+			if (realUser and string.find(tx, realUser, 1, true)) or (realDisplay and realDisplay ~= "" and string.find(tx, realDisplay, 1, true)) or (fake ~= "" and string.find(tx, fake, 1, true)) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function paintStat(inst, m)
+	if statsHooked[inst] == "busy" or not inst.Parent then
+		return
+	end
+	if screen and inst:IsDescendantOf(screen) then
+		return
+	end
+	if not ownedByUs(inst, m) then
+		return
+	end
+	local nextText = rewriteStatText(inst.Text, m)
+	if nextText ~= inst.Text then
+		if not statsOrig[inst] then
+			statsOrig[inst] = inst.Text
+		end
+		statsHooked[inst] = "busy"
+		inst.Text = nextText
+		local tier = rankTier(tostring(get(m, "Rank") or ""))
+		if RANK_COLOR[tier] and string.find(nextText, tier, 1, true) and #nextText < 20 then
+			inst.TextColor3 = RANK_COLOR[tier]
+		end
+		if string.find(nextText, "RP /", 1, true) and inst.Parent then
+			local rp = math.floor(tonumber(get(m, "RP")) or 0)
+			for _, s in ipairs(inst.Parent:GetDescendants()) do
+				if s:IsA("Frame") and s.AbsoluteSize.Y > 0 and s.AbsoluteSize.Y < 22 and s.BackgroundTransparency < 0.4 then
+					s.Size = UDim2.new(math.clamp(rp / 100, 0, 1), 0, s.Size.Y.Scale, s.Size.Y.Offset)
+				end
+			end
+		end
+		statsHooked[inst] = true
+	end
+end
+
+local function hookStatLabel(inst, m)
+	if statsHooked[inst] or not (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
+		return
+	end
+	statsHooked[inst] = true
+	inst:GetPropertyChangedSignal("Text"):Connect(function()
+		local mod = Modules["Fake Stats"]
+		if mod and mod.enabled then
+			paintStat(inst, mod)
+		end
+	end)
+	paintStat(inst, m)
+end
+
+local function scanStats(root, m)
+	if not root then
+		return
+	end
+	for _, d in ipairs(root:GetDescendants()) do
+		if d:IsA("TextLabel") or d:IsA("TextButton") then
+			hookStatLabel(d, m)
+		end
+	end
 end
 
 add("Larping", "Fake NM Emote", "Nightmare pose and aura, no picker wheel. Fires the emote remote", function(m)
@@ -1802,22 +1952,50 @@ end, function(on)
 			h.AutoRotate = true
 		end
 	end
-end, function(m)
+end, function()
 	if not nmFolder or not nmFolder.Parent then
-		if get(m, "Aura") then
-			startNm()
-		end
+		startNm()
 	end
-	hideEmoteWheel()
-end, 0.4)
+end, 0.5)
 
 add("Larping", "Fake Stats", "Spoofs your name, ranked division, RP bar, and leaderboard #", function(m)
 	opt(m, "Name", "text", lp.DisplayName or lp.Name)
 	opt(m, "Rank", "list", "Platinum 4", { list = RANK_LIST })
 	opt(m, "RP", "slider", 20, { min = 0, max = 100, suffix = " RP" })
 	opt(m, "Leaderboard", "text", "1880")
-end, function(on)
-	if not on then
+end, function(on, m)
+	if on then
+		realUser = realUser or lp.Name
+		realDisplay = realDisplay or lp.DisplayName
+		local function watch(root)
+			if not root then
+				return
+			end
+			table.insert(m.conns, root.DescendantAdded:Connect(function(inst)
+				if m.enabled and (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
+					hookStatLabel(inst, m)
+				end
+			end))
+			scanStats(root, m)
+		end
+		watch(lp:FindFirstChild("PlayerGui"))
+		pcall(function()
+			watch(game:GetService("CoreGui"))
+		end)
+		for _, d in ipairs(workspace:GetDescendants()) do
+			if d:IsA("SurfaceGui") or d:IsA("BillboardGui") then
+				scanStats(d, m)
+			end
+		end
+		table.insert(m.conns, workspace.DescendantAdded:Connect(function(inst)
+			if m.enabled and (inst:IsA("TextLabel") or inst:IsA("TextButton")) then
+				local gui = inst:FindFirstAncestorWhichIsA("SurfaceGui") or inst:FindFirstAncestorWhichIsA("BillboardGui")
+				if gui then
+					hookStatLabel(inst, m)
+				end
+			end
+		end))
+	else
 		for inst, t in pairs(statsOrig) do
 			if inst.Parent then
 				pcall(function()
@@ -1826,10 +2004,31 @@ end, function(on)
 			end
 		end
 		statsOrig = {}
+		pcall(function()
+			lp.DisplayName = realDisplay or lp.Name
+		end)
 	end
 end, function(m)
-	applyFakeStats(m)
-end, 0.35)
+	local name = tostring(get(m, "Name") or "")
+	if name ~= "" then
+		pcall(function()
+			lp.DisplayName = name
+		end)
+		local h = hum()
+		if h then
+			pcall(function()
+				h.DisplayName = name
+			end)
+		end
+	end
+	for inst in pairs(statsHooked) do
+		if typeof(inst) == "Instance" and inst.Parent then
+			paintStat(inst, m)
+		else
+			statsHooked[inst] = nil
+		end
+	end
+end, 0.25)
 
 add("World", "Nuker", "Fast-breaks bed defense, then the bed", function(m)
 	opt(m, "Range", "slider", 30, { min = 10, max = 40, suffix = " st" })
