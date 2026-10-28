@@ -1756,8 +1756,7 @@ local function rpParts(m)
 	local rank = tostring(get(m, "Rank") or "Nightmare")
 	if tierOf(rank) == "Nightmare" then
 		local raw = math.clamp(math.floor(tonumber(get(m, "Nightmare RP")) or tonumber(get(m, "RP")) or 0), 0, 1000)
-		-- Full rank strip plus a plain "N RP" line, same layout as the real Nightmare card.
-		return rank, raw, math.max(raw, 1), string.format("%d RP", raw)
+		return rank, raw, 0, string.format("%d RP", raw)
 	end
 	local shown = math.clamp(math.floor(tonumber(get(m, "RP")) or 0), 0, 100)
 	return rank, shown, 100, string.format("%d RP / 100", shown)
@@ -2010,6 +2009,7 @@ end
 
 local oldUsername, oldDisplay, oldLevel
 local statSwapped, statWatch, barSaved, statColor = {}, {}, {}, {}
+local rpMade, rpHidden = {}, {}
 local savedAttr = {}
 local statWriting
 local realNames = {}
@@ -2040,7 +2040,7 @@ local function commaNum(n)
 end
 
 local function fakeLevel(m)
-	return math.clamp(math.floor(tonumber(get(m, "Level")) or 0), 0, 999)
+	return math.clamp(math.floor(tonumber(get(m, "Level")) or 0), 0, 200)
 end
 
 local function fakeStreak(m)
@@ -2173,7 +2173,7 @@ local function statText(text, m)
 		return text
 	end
 	local name = tostring(get(m, "Name") or "")
-	local rank, _, _, rpLine = rpParts(m)
+	local rank = tostring(get(m, "Rank") or "Nightmare")
 	local lb = tonumber((tostring(get(m, "Leaderboard Rank") or "1"):gsub(",", ""))) or 1
 	if name ~= "" then
 		for _, old in ipairs(realNames) do
@@ -2199,9 +2199,6 @@ local function statText(text, m)
 	end
 	if string.find(text, "Leaderboard Rank", 1, true) then
 		return "Leaderboard Rank: " .. commaNum(lb)
-	end
-	if isRpLine(text) then
-		return rpLine
 	end
 	local trimmed = string.match(text, "^%s*(.-)%s*$") or text
 	if #trimmed <= 18 then
@@ -2360,13 +2357,110 @@ local function reapplyBars(m)
 			paintFill(frame, ratio, color, hide)
 		end
 	end
+	if hide then
+		local _, _, _, rpLine = rpParts(m)
+		for _, line in ipairs(rpMade) do
+			if line.Parent then
+				line.Text = rpLine
+			end
+		end
+		for obj in pairs(rpHidden) do
+			if typeof(obj) == "Instance" and obj.Parent then
+				obj.TextTransparency = 1
+			end
+		end
+	end
+end
+
+local function layoutNightmare(anchor, rpLine, color)
+	local lb = anchor
+	if not string.find(tostring(anchor.Text), "Leaderboard Rank", 1, true) then
+		local node = anchor
+		for _ = 1, 5 do
+			if not node then
+				break
+			end
+			for _, ch in ipairs(node:GetDescendants()) do
+				if (ch:IsA("TextLabel") or ch:IsA("TextButton")) and string.find(ch.Text, "Leaderboard Rank", 1, true) then
+					lb = ch
+					break
+				end
+			end
+			if lb ~= anchor or node:IsA("SurfaceGui") or node:IsA("BillboardGui") or node:IsA("ScreenGui") then
+				break
+			end
+			node = node.Parent
+		end
+	end
+	if not lb or not string.find(tostring(lb.Text), "Leaderboard Rank", 1, true) then
+		return
+	end
+	local scopes = { lb.Parent, lb.Parent and lb.Parent.Parent }
+	for _, scope in ipairs(scopes) do
+		if scope then
+			for _, ch in ipairs(scope:GetDescendants()) do
+				if ch:IsA("Frame") or ch:IsA("ImageLabel") or ch:IsA("ImageButton") then
+					local size = ch.AbsoluteSize
+					if size.Y >= 2 and size.Y <= 16 and size.X >= 20 then
+						if math.abs(ch.AbsolutePosition.Y - lb.AbsolutePosition.Y) < 70 then
+							paintFill(ch, 0, color, true)
+						end
+					end
+				end
+			end
+		end
+	end
+	local column = lb.Parent
+	local line = column and column:FindFirstChild("QW_RP")
+	if column and not line then
+		line = Instance.new("TextLabel")
+		line.Name = "QW_RP"
+		line.BackgroundTransparency = 1
+		line.Font = lb.Font
+		line.TextSize = lb.TextSize
+		line.TextColor3 = lb.TextColor3
+		line.TextXAlignment = lb.TextXAlignment
+		line.TextYAlignment = Enum.TextYAlignment.Top
+		line.ZIndex = lb.ZIndex
+		line.LayoutOrder = lb.LayoutOrder + 1
+		if column:FindFirstChildOfClass("UIListLayout") then
+			line.Size = UDim2.new(1, 0, 0, lb.TextSize + 6)
+		else
+			line.AnchorPoint = lb.AnchorPoint
+			line.Position = UDim2.new(lb.Position.X.Scale, lb.Position.X.Offset, lb.Position.Y.Scale, lb.Position.Y.Offset + math.max(lb.AbsoluteSize.Y, lb.TextSize))
+			line.Size = UDim2.new(lb.Size.X.Scale, lb.Size.X.Offset, 0, lb.TextSize + 4)
+		end
+		line.Parent = column
+		table.insert(rpMade, line)
+	end
+	if line then
+		line.Text = rpLine
+		line.Visible = true
+		line.TextTransparency = 0
+	end
+	local root = lb
+	while root.Parent and not root:IsA("SurfaceGui") and not root:IsA("BillboardGui") and not root:IsA("ScreenGui") do
+		root = root.Parent
+	end
+	for _, ch in ipairs(root:GetDescendants()) do
+		if ch ~= line and ch.Name ~= "QW_RP" and (ch:IsA("TextLabel") or ch:IsA("TextButton") or ch:IsA("TextBox")) and isRpLine(ch.Text) then
+			if rpHidden[ch] == nil then
+				rpHidden[ch] = ch.TextTransparency
+			end
+			ch.TextTransparency = 1
+		end
+	end
 end
 
 local function styleRankBlock(anchor, m)
 	if not anchor or not anchor.Parent then
 		return
 	end
-	local _, shown, maxRp, rpLine = rpParts(m)
+	local rankName, shown, maxRp, rpLine = rpParts(m)
+	if tierOf(rankName) == "Nightmare" then
+		layoutNightmare(anchor, rpLine, rankColor(rankName))
+		return
+	end
 	local color = rankColor(get(m, "Rank"))
 	local ratio = maxRp > 0 and (shown / maxRp) or 0
 	local node = anchor.Parent
@@ -3070,9 +3164,9 @@ end, function()
 	end
 end, 0.05)
 
-add("Larping", "Fake Stats", "Name, level, winstreak, rank, leaderboard place, and RP. Nightmare keeps the normal rank bar and a plain RP number", function(m)
+add("Larping", "Fake Stats", "Name, level, winstreak, rank, leaderboard place, and RP. Nightmare matches the rank card: name, leaderboard, then RP", function(m)
 	opt(m, "Name", "text", "corapses")
-	opt(m, "Level", "slider", 100, { min = 0, max = 999 })
+	opt(m, "Level", "slider", 100, { min = 0, max = 200 })
 	opt(m, "Winstreak", "slider", 10, { min = 0, max = 999 })
 	opt(m, "Rank", "list", "Nightmare", { list = RANK_LIST })
 	opt(m, "RP", "slider", 20, { min = 0, max = 100, suffix = " RP" })
@@ -3216,6 +3310,18 @@ end, function(on, m)
 			end
 		end
 		table.clear(barSaved)
+		for _, line in ipairs(rpMade) do
+			if typeof(line) == "Instance" then
+				line:Destroy()
+			end
+		end
+		table.clear(rpMade)
+		for obj, old in pairs(rpHidden) do
+			if typeof(obj) == "Instance" and obj.Parent then
+				obj.TextTransparency = old
+			end
+		end
+		table.clear(rpHidden)
 		pcall(function()
 			RunService:UnbindFromRenderStep("QW_RankBar")
 		end)
@@ -3797,8 +3903,31 @@ local function sliderRow(o, order)
 	hold.Parent = panel
 	local name = label(hold, o.name, 12, TXT)
 	name.Size = UDim2.new(1, 0, 0, 14)
-	local val = label(hold, fmt(o), 12, DIM, Enum.TextXAlignment.Right)
+	local val = Instance.new("TextButton")
+	val.AutoButtonColor = false
+	val.BackgroundTransparency = 1
+	val.Font = Enum.Font.Gotham
+	val.TextSize = 12
+	val.TextColor3 = DIM
+	val.TextXAlignment = Enum.TextXAlignment.Right
+	val.Text = fmt(o)
 	val.Size = UDim2.new(1, 0, 0, 14)
+	val.ZIndex = 3
+	val.Parent = hold
+	local box = Instance.new("TextBox")
+	box.Visible = false
+	box.ClearTextOnFocus = false
+	box.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	box.BackgroundTransparency = 0.9
+	box.Font = Enum.Font.Gotham
+	box.TextSize = 12
+	box.TextColor3 = TXT
+	box.TextXAlignment = Enum.TextXAlignment.Right
+	box.Size = UDim2.new(0.55, 0, 0, 16)
+	box.Position = UDim2.new(0.45, 0, 0, -1)
+	box.ZIndex = 4
+	box.Parent = hold
+	corner(box, 4)
 	local track = Instance.new("TextButton")
 	track.AutoButtonColor = false
 	track.Text = ""
@@ -3817,6 +3946,22 @@ local function sliderRow(o, order)
 		fill.Size = UDim2.new(math.clamp((o.value - o.min) / math.max(o.max - o.min, 1e-3), 0, 1), 0, 1, 0)
 		val.Text = fmt(o)
 	end
+	local function applyTyped()
+		local n = tonumber(string.match(box.Text, "[-%d%.]+"))
+		if n then
+			o.value = math.clamp(math.floor(n / o.step + 0.5) * o.step, o.min, o.max)
+		end
+		box.Visible = false
+		val.Visible = true
+		paint()
+	end
+	val.MouseButton1Click:Connect(function()
+		box.Text = tostring(o.value)
+		box.Visible = true
+		val.Visible = false
+		box:CaptureFocus()
+	end)
+	box.FocusLost:Connect(applyTyped)
 	local function set(x)
 		local a = math.clamp((x - track.AbsolutePosition.X) / math.max(track.AbsoluteSize.X, 1), 0, 1)
 		local v = o.min + (o.max - o.min) * a
