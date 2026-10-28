@@ -1598,8 +1598,18 @@ local RANK_LIST = {
 	"Gold 1", "Gold 2", "Gold 3", "Gold 4",
 	"Platinum 1", "Platinum 2", "Platinum 3", "Platinum 4",
 	"Diamond 1", "Diamond 2", "Diamond 3",
-	"Emerald",
+	"Emerald 1", "Emerald 2", "Emerald 3", "Emerald 4",
 	"Nightmare",
+}
+
+local RANK_COLOR = {
+	Bronze = Color3.fromRGB(176, 112, 64),
+	Silver = Color3.fromRGB(198, 206, 214),
+	Gold = Color3.fromRGB(255, 190, 60),
+	Platinum = Color3.fromRGB(55, 230, 220),
+	Diamond = Color3.fromRGB(70, 150, 255),
+	Emerald = Color3.fromRGB(50, 210, 130),
+	Nightmare = Color3.fromRGB(186, 92, 255),
 }
 
 local RANK_IMAGE = {
@@ -1676,6 +1686,51 @@ local function isRankImage(image)
 	return false
 end
 
+local function rankColor(rank)
+	loadRankMeta()
+	local want = string.lower(tostring(rank or ""))
+	if type(rankMeta) == "table" then
+		for _, div in pairs(rankMeta) do
+			if type(div) == "table" and type(div.name) == "string" and string.lower(div.name) == want then
+				for _, key in ipairs({ "color", "progressColor", "barColor", "backgroundColor" }) do
+					if typeof(div[key]) == "Color3" then
+						return div[key]
+					end
+				end
+			end
+		end
+	end
+	return RANK_COLOR[tierOf(rank)] or RANK_COLOR.Platinum
+end
+
+local function rpParts(m)
+	local rank = tostring(get(m, "Rank") or "Nightmare")
+	if tierOf(rank) == "Nightmare" then
+		local raw = math.clamp(math.floor(tonumber(get(m, "Nightmare RP")) or 0), 0, 1000)
+		return rank, raw, 1000, string.format("%d RP", raw)
+	end
+	local shown = math.clamp(math.floor(tonumber(get(m, "RP")) or 0), 0, 100)
+	return rank, shown, 100, string.format("%d RP / 100", shown)
+end
+
+local function plainText(text)
+	text = string.gsub(tostring(text or ""), "<.->", "")
+	text = string.gsub(text, "\n", " ")
+	return string.match(text, "^%s*(.-)%s*$") or text
+end
+
+local function isRpLine(text)
+	local plain = plainText(text)
+	if plain == "" or #plain > 32 then
+		return false
+	end
+	local lower = string.lower(plain)
+	if string.find(lower, "leaderboard", 1, true) or not string.find(lower, "rp", 1, true) then
+		return false
+	end
+	return string.find(plain, "%d") ~= nil
+end
+
 local nmTrack, nmEffect, nmFollow, nmAsset, nmLooked, nmMissing, nmKey, nmSent
 local function stopNm()
 	if nmFollow then
@@ -1684,9 +1739,19 @@ local function stopNm()
 		end)
 		nmFollow = false
 	end
+	local h = hum()
+	if h then
+		for _, track in ipairs(h:GetPlayingAnimationTracks()) do
+			if track == nmTrack or string.find(string.lower(tostring(track.Name)), "nightmare", 1, true) then
+				pcall(function()
+					track:Stop(0.05)
+				end)
+			end
+		end
+	end
 	if nmTrack then
 		pcall(function()
-			nmTrack:Stop(0.1)
+			nmTrack:Stop(0.05)
 			nmTrack:Destroy()
 		end)
 		nmTrack = nil
@@ -1894,7 +1959,7 @@ local function playNm()
 end
 
 local oldUsername, oldDisplay
-local statSwapped, statWatch = {}, {}
+local statSwapped, statWatch, barSaved = {}, {}, {}
 local statWriting
 local realNames = {}
 local shownName = ""
@@ -1928,8 +1993,7 @@ local function statText(text, m)
 		return text
 	end
 	local name = tostring(get(m, "Name") or "")
-	local rank = tostring(get(m, "Rank") or "Platinum 4")
-	local rp = math.floor(tonumber(get(m, "RP")) or 0)
+	local rank, _, _, rpLine = rpParts(m)
 	local lb = tonumber((tostring(get(m, "Leaderboard") or "1"):gsub(",", ""))) or 1
 	if name ~= "" then
 		for _, old in ipairs(realNames) do
@@ -1950,8 +2014,8 @@ local function statText(text, m)
 	if string.find(text, "Leaderboard Rank", 1, true) then
 		return "Leaderboard Rank: " .. commaNum(lb)
 	end
-	if #text < 28 and string.find(string.lower(text), "rp", 1, true) and string.find(text, "/", 1, true) then
-		return tostring(rp) .. " RP / 100"
+	if isRpLine(text) then
+		return rpLine
 	end
 	local trimmed = string.match(text, "^%s*(.-)%s*$") or text
 	if #trimmed <= 18 then
@@ -2036,6 +2100,121 @@ local function cardIsMine(obj)
 	return false
 end
 
+local function rememberBar(frame)
+	if barSaved[frame] == nil then
+		local grad = frame:FindFirstChildOfClass("UIGradient")
+		barSaved[frame] = {
+			Color = frame:IsA("ImageLabel") and frame.ImageColor3 or frame.BackgroundColor3,
+			Size = frame.Size,
+			Gradient = grad and grad.Color or nil,
+		}
+	end
+end
+
+local function paintFill(frame, ratio, color)
+	if not frame or not frame.Parent then
+		return
+	end
+	rememberBar(frame)
+	local yScale, yOffset = frame.Size.Y.Scale, frame.Size.Y.Offset
+	frame.Size = UDim2.new(math.clamp(ratio, 0, 1), 0, yScale, yOffset)
+	if frame:IsA("ImageLabel") or frame:IsA("ImageButton") then
+		frame.ImageColor3 = color
+	else
+		frame.BackgroundColor3 = color
+		frame.BackgroundTransparency = 0
+	end
+	local grad = frame:FindFirstChildOfClass("UIGradient")
+	if grad then
+		grad.Color = ColorSequence.new(color, color)
+	end
+end
+
+local function reapplyBars(m)
+	local rank, shown, maxRp = rpParts(m)
+	local color = rankColor(rank)
+	local ratio = maxRp > 0 and (shown / maxRp) or 0
+	for frame in pairs(barSaved) do
+		if typeof(frame) == "Instance" and frame.Parent then
+			paintFill(frame, ratio, color)
+		end
+	end
+end
+
+local function styleRankBlock(anchor, m)
+	if not anchor or not anchor.Parent then
+		return
+	end
+	local _, shown, maxRp, rpLine = rpParts(m)
+	local color = rankColor(get(m, "Rank"))
+	local ratio = maxRp > 0 and (shown / maxRp) or 0
+	local node = anchor.Parent
+	local block = node
+	for _ = 1, 6 do
+		if not node or node:IsA("ScreenGui") or node:IsA("SurfaceGui") or node:IsA("BillboardGui") then
+			break
+		end
+		local count, hasRp = 0, false
+		for _, ch in ipairs(node:GetDescendants()) do
+			count += 1
+			if count > 140 then
+				break
+			end
+			if (ch:IsA("TextLabel") or ch:IsA("TextButton") or ch:IsA("TextBox")) and isRpLine(ch.Text) then
+				hasRp = true
+			end
+		end
+		if hasRp and count <= 140 then
+			block = node
+			break
+		end
+		node = node.Parent
+	end
+	if not block then
+		return
+	end
+	for _, ch in ipairs(block:GetDescendants()) do
+		if (ch:IsA("TextLabel") or ch:IsA("TextButton") or ch:IsA("TextBox")) and isRpLine(ch.Text) and ch.Text ~= rpLine then
+			if statSwapped[ch] == nil then
+				statSwapped[ch] = ch.Text
+			end
+			statWriting = ch
+			ch.Text = rpLine
+			statWriting = nil
+		end
+	end
+	local function besideRp(frame)
+		local parent = frame.Parent
+		local grand = parent and parent.Parent
+		for _, scope in ipairs({ parent, grand }) do
+			if scope then
+				for _, other in ipairs(scope:GetDescendants()) do
+					if (other:IsA("TextLabel") or other:IsA("TextButton") or other:IsA("TextBox")) and isRpLine(other.Text) then
+						return true
+					end
+				end
+			end
+		end
+		return false
+	end
+	for _, ch in ipairs(block:GetDescendants()) do
+		if (ch:IsA("Frame") or ch:IsA("ImageLabel")) and besideRp(ch) then
+			local size = ch.AbsoluteSize
+			local parent = ch.Parent
+			if size.Y >= 3 and size.Y <= 18 and size.X >= 16 and parent and parent:IsA("GuiObject") then
+				local psize = parent.AbsoluteSize
+				local colorSum = ch.BackgroundColor3.R + ch.BackgroundColor3.G + ch.BackgroundColor3.B
+				local parentSum = parent.BackgroundColor3.R + parent.BackgroundColor3.G + parent.BackgroundColor3.B
+				local brighter = colorSum > parentSum + 0.2
+				local shorter = size.X < psize.X - 4
+				if psize.Y >= 3 and psize.Y <= 22 and psize.X >= 40 and (brighter or shorter) then
+					paintFill(ch, ratio, color)
+				end
+			end
+		end
+	end
+end
+
 local function paintStatObject(obj, m)
 	if statWriting == obj or not obj or not obj.Parent or obj:FindFirstAncestor("Quantumware") then
 		return
@@ -2062,9 +2241,12 @@ local function paintStatObject(obj, m)
 	end
 	local nextText = statText(obj.Text, m)
 	local rank = tostring(get(m, "Rank") or "")
-	local rankish = nextText == rank or string.find(nextText, "Leaderboard Rank", 1, true) or string.find(tostring(nextText), "RP /", 1, true)
+	local rankish = nextText == rank or string.find(nextText, "Leaderboard Rank", 1, true) or isRpLine(nextText)
 	if nextText ~= obj.Text and rankish and not cardIsMine(obj) then
 		return
+	end
+	if rankish and (nextText == rank or string.find(obj.Text, "Leaderboard Rank", 1, true) or string.find(nextText, "Leaderboard Rank", 1, true)) then
+		styleRankBlock(obj, m)
 	end
 	if nextText ~= obj.Text then
 		if statSwapped[obj] == nil then
@@ -2237,8 +2419,7 @@ local function rewriteRankResult(value, requested)
 	if not mod or not mod.enabled or type(value) ~= "table" or value.andThen then
 		return
 	end
-	local rankName = tostring(get(mod, "Rank") or "Platinum 4")
-	local rp = math.floor(tonumber(get(mod, "RP")) or 0)
+	local rankName, rp = rpParts(mod)
 	local lb = tonumber((tostring(get(mod, "Leaderboard") or "1"):gsub(",", ""))) or 1
 	local fakeName = tostring(get(mod, "Name") or "")
 	patchProfile(value, requested, 0, rankName, rp, lb, fakeName, divisionIdFor(rankName))
@@ -2384,7 +2565,7 @@ local function hookTextWrites()
 					return value
 				end
 				local rank = tostring(get(mod, "Rank") or "")
-				local rankish = nextText == rank or string.find(nextText, "Leaderboard Rank", 1, true) ~= nil or string.find(nextText, "RP /", 1, true) ~= nil
+				local rankish = nextText == rank or string.find(nextText, "Leaderboard Rank", 1, true) ~= nil or isRpLine(nextText)
 				if rankish and not cardIsMine(obj) then
 					return value
 				end
@@ -2415,7 +2596,7 @@ local function hookTextWrites()
 	textHooked = old ~= nil
 end
 
-add("Larping", "Fake NM Emote", "Plays the real Nightmare emote: pose, sound, and aura. No picker", nil, function(on)
+add("Larping", "Fake NM Emote", "Plays the Nightmare emote. Walking or jumping turns it off", nil, function(on)
 	if on then
 		nmMissing = false
 		nmSent = false
@@ -2430,33 +2611,30 @@ end, function()
 	if not mod or not mod.enabled then
 		return
 	end
-	local body = char()
-	if body and nmKey ~= nil and body:GetAttribute("PlayingEmote") ~= nmKey then
-		pcall(function()
-			body:SetAttribute("PlayingEmote", nmKey)
-		end)
+	local h = hum()
+	local moving = false
+	if h and (h.MoveDirection.Magnitude > 0.05 or h.Jump) then
+		moving = true
 	end
-	local pg = lp:FindFirstChildOfClass("PlayerGui")
-	if pg then
-		for _, gui in ipairs(pg:GetChildren()) do
-			if gui:IsA("ScreenGui") and gui.Enabled then
-				local lname = string.lower(gui.Name)
-				if string.find(lname, "emote", 1, true) and (string.find(lname, "wheel", 1, true) or string.find(lname, "picker", 1, true) or string.find(lname, "radial", 1, true)) then
-					gui.Enabled = false
-				end
+	if not moving then
+		for _, key in ipairs({ Enum.KeyCode.W, Enum.KeyCode.A, Enum.KeyCode.S, Enum.KeyCode.D, Enum.KeyCode.Space }) do
+			if UserInputService:IsKeyDown(key) then
+				moving = true
+				break
 			end
 		end
 	end
-	local h = hum()
-	if h and (not nmTrack or not nmTrack.IsPlaying) then
-		playNm()
+	if moving then
+		stopNm()
+		setOn(mod, false)
 	end
-end, 0.75)
+end, 0.05)
 
-add("Larping", "Fake Stats", "Changes the name, rank, RP, and leaderboard slot the game UI reads", function(m)
+add("Larping", "Fake Stats", "Name, rank, and leaderboard. Division RP is 0-100. Nightmare RP is 0-1000", function(m)
 	opt(m, "Name", "text", "corapses")
 	opt(m, "Rank", "list", "Nightmare", { list = RANK_LIST })
-	opt(m, "RP", "slider", 100, { min = 0, max = 100, suffix = " RP" })
+	opt(m, "RP", "slider", 20, { min = 0, max = 100, suffix = " RP" })
+	opt(m, "Nightmare RP", "slider", 477, { min = 0, max = 1000, suffix = " RP" })
 	opt(m, "Leaderboard", "text", "1")
 end, function(on, m)
 	if on then
@@ -2471,6 +2649,14 @@ end, function(on, m)
 		hookGamePlayer()
 		pcall(hookRankRemotes)
 		pcall(hookTextWrites)
+		pcall(function()
+			RunService:UnbindFromRenderStep("QW_RankBar")
+		end)
+		RunService:BindToRenderStep("QW_RankBar", Enum.RenderPriority.Last.Value, function()
+			if m.enabled then
+				reapplyBars(m)
+			end
+		end)
 		shownName = tostring(get(m, "Name") or "")
 		local function watch(root, guisOnly)
 			if not root then
@@ -2544,6 +2730,24 @@ end, function(on, m)
 		end
 		statWriting = nil
 		table.clear(statSwapped)
+		for frame, saved in pairs(barSaved) do
+			if typeof(frame) == "Instance" and frame.Parent and type(saved) == "table" then
+				frame.Size = saved.Size
+				if frame:IsA("ImageLabel") or frame:IsA("ImageButton") then
+					frame.ImageColor3 = saved.Color
+				else
+					frame.BackgroundColor3 = saved.Color
+				end
+				local grad = frame:FindFirstChildOfClass("UIGradient")
+				if grad and saved.Gradient then
+					grad.Color = saved.Gradient
+				end
+			end
+		end
+		table.clear(barSaved)
+		pcall(function()
+			RunService:UnbindFromRenderStep("QW_RankBar")
+		end)
 		shownName = ""
 		pcall(function()
 			lp.DisplayName = realNames[2] or realNames[1] or lp.Name
@@ -2569,7 +2773,8 @@ end, function(m)
 			paintStatObject(obj, m)
 		end
 	end
-end, 1)
+	reapplyBars(m)
+end, 0.2)
 add("World", "Nuker", "Fast-breaks bed defense, then the bed", function(m)
 	opt(m, "Range", "slider", 30, { min = 10, max = 40, suffix = " st" })
 	opt(m, "Delay", "slider", 80, { min = 40, max = 300, step = 10, suffix = "ms" })
