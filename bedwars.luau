@@ -872,11 +872,18 @@ local function get(mod, name)
 end
 
 local refreshHud
+local pushToast
 local function setOn(mod, state)
 	if mod.enabled == state then
 		return
 	end
 	mod.enabled = state
+	if mod.paint then
+		pcall(mod.paint)
+	end
+	if pushToast then
+		pushToast(mod.name, state)
+	end
 	if not state then
 		for _, c in ipairs(mod.conns) do
 			pcall(function()
@@ -893,9 +900,6 @@ local function setOn(mod, state)
 	end
 	if mod.toggle then
 		pcall(mod.toggle, state, mod)
-	end
-	if mod.paint then
-		mod.paint()
 	end
 	if refreshHud then
 		refreshHud()
@@ -1597,7 +1601,7 @@ local RANK_LIST = {
 	"Silver 1", "Silver 2", "Silver 3", "Silver 4",
 	"Gold 1", "Gold 2", "Gold 3", "Gold 4",
 	"Platinum 1", "Platinum 2", "Platinum 3", "Platinum 4",
-	"Diamond 1", "Diamond 2", "Diamond 3",
+	"Diamond 1", "Diamond 2", "Diamond 3", "Diamond 4",
 	"Emerald 1", "Emerald 2", "Emerald 3", "Emerald 4",
 	"Nightmare",
 }
@@ -1706,8 +1710,8 @@ end
 local function rpParts(m)
 	local rank = tostring(get(m, "Rank") or "Nightmare")
 	if tierOf(rank) == "Nightmare" then
-		local raw = math.clamp(math.floor(tonumber(get(m, "Nightmare RP")) or 0), 0, 1000)
-		return rank, raw, 1000, string.format("%d RP", raw)
+		local raw = math.clamp(math.floor(tonumber(get(m, "Nightmare RP")) or tonumber(get(m, "RP")) or 0), 0, 1000)
+		return rank, raw, 0, string.format("%d RP", raw)
 	end
 	local shown = math.clamp(math.floor(tonumber(get(m, "RP")) or 0), 0, 100)
 	return rank, shown, 100, string.format("%d RP / 100", shown)
@@ -1958,8 +1962,9 @@ local function playNm()
 	end)
 end
 
-local oldUsername, oldDisplay
-local statSwapped, statWatch, barSaved = {}, {}, {}
+local oldUsername, oldDisplay, oldLevel
+local statSwapped, statWatch, barSaved, statColor = {}, {}, {}, {}
+local savedAttr = {}
 local statWriting
 local realNames = {}
 local shownName = ""
@@ -1988,13 +1993,142 @@ local function commaNum(n)
 	return s
 end
 
+local function fakeLevel(m)
+	return math.clamp(math.floor(tonumber(get(m, "Level")) or 0), 0, 999)
+end
+
+local function fakeStreak(m)
+	return math.clamp(math.floor(tonumber(get(m, "Winstreak")) or 0), 0, 999)
+end
+
+local LEVEL_BANDS = {
+	{ 100, Color3.fromRGB(186, 92, 255) },
+	{ 90, Color3.fromRGB(255, 236, 140) },
+	{ 80, Color3.fromRGB(255, 214, 64) },
+	{ 70, Color3.fromRGB(255, 140, 40) },
+	{ 60, Color3.fromRGB(255, 90, 90) },
+	{ 50, Color3.fromRGB(255, 170, 40) },
+	{ 40, Color3.fromRGB(214, 96, 255) },
+	{ 30, Color3.fromRGB(90, 120, 255) },
+	{ 20, Color3.fromRGB(70, 200, 255) },
+	{ 10, Color3.fromRGB(80, 220, 120) },
+	{ 0, Color3.fromRGB(186, 194, 204) },
+}
+
+local levelColorFn = nil
+local function colorForLevel(level)
+	if levelColorFn == nil then
+		levelColorFn = false
+		local ts = ReplicatedStorage:FindFirstChild("TS")
+		if ts then
+			for _, inst in ipairs(ts:GetDescendants()) do
+				if inst:IsA("ModuleScript") then
+					local n = string.lower(inst.Name)
+					if n == "player-level-util" or n == "player-level-meta" or n == "level-meta" or n == "level-util" then
+						local ok, mod = pcall(require, inst)
+						if ok and type(mod) == "table" then
+							local util = mod.PlayerLevelUtil or mod
+							if type(util) == "table" then
+								local fn = util.getLevelColor or util.getColor or util.getLevelBadgeColor
+								if type(fn) == "function" then
+									levelColorFn = fn
+									break
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	end
+	if type(levelColorFn) == "function" then
+		local ok, color = pcall(levelColorFn, level)
+		if (not ok or typeof(color) ~= "Color3") then
+			ok, color = pcall(levelColorFn, nil, level)
+		end
+		if ok and typeof(color) == "Color3" then
+			return color
+		end
+	end
+	for _, band in ipairs(LEVEL_BANDS) do
+		if level >= band[1] then
+			return band[2]
+		end
+	end
+	return LEVEL_BANDS[#LEVEL_BANDS][2]
+end
+
+local function nameHas(name, word)
+	local n = string.lower(tostring(name or ""))
+	if word == "level" and (string.find(n, "levelreq", 1, true) or string.find(n, "levelup", 1, true) or string.find(n, "milestone", 1, true)) then
+		return false
+	end
+	if word == "streak" and (string.find(n, "best", 1, true) or string.find(n, "highest", 1, true)) then
+		return false
+	end
+	return string.find(n, word, 1, true) ~= nil
+end
+
+local function namedStat(obj, word)
+	if nameHas(obj.Name, word) then
+		return true
+	end
+	local parent = obj.Parent
+	if parent and nameHas(parent.Name, word) then
+		return true
+	end
+	return false
+end
+
+local function levelishText(text)
+	local plain = plainText(text)
+	if plain == "" or #plain > 16 then
+		return false
+	end
+	return string.match(plain, "^%d[%d,]*$") ~= nil
+		or string.match(plain, "^%[%s*%d[%d,]*%s*%]$") ~= nil
+		or string.match(plain, "^[Ll][Vv]%.?%s*%d[%d,]*$") ~= nil
+		or string.match(plain, "^[Ll]evel%s*:?%s*%d[%d,]*$") ~= nil
+end
+
+local function formatLevel(original, level)
+	local plain = plainText(original)
+	local n = tostring(level)
+	if string.match(plain, "^%[") then
+		return "[" .. n .. "]"
+	end
+	if string.match(string.lower(plain), "^lv") then
+		return "Lv. " .. n
+	end
+	if string.match(string.lower(plain), "^level") then
+		return "Level " .. n
+	end
+	return n
+end
+
+local function streakCaption(text)
+	local plain = string.lower(plainText(text))
+	return plain == "winstreak" or plain == "win streak" or plain == "winstreak:" or plain == "win streak:"
+end
+
+local function streakLine(text)
+	local plain = string.lower(plainText(text))
+	if #plain > 28 or string.find(plain, "highest", 1, true) or string.find(plain, "best", 1, true) then
+		return false
+	end
+	if not (string.find(plain, "winstreak", 1, true) or string.find(plain, "win streak", 1, true)) then
+		return false
+	end
+	return string.find(plain, "%d") ~= nil
+end
+
 local function statText(text, m)
 	if type(text) ~= "string" or text == "" or #text > 90 then
 		return text
 	end
 	local name = tostring(get(m, "Name") or "")
 	local rank, _, _, rpLine = rpParts(m)
-	local lb = tonumber((tostring(get(m, "Leaderboard") or "1"):gsub(",", ""))) or 1
+	local lb = tonumber((tostring(get(m, "Leaderboard Rank") or "1"):gsub(",", ""))) or 1
 	if name ~= "" then
 		for _, old in ipairs(realNames) do
 			if old ~= "" and old ~= name then
@@ -2009,6 +2143,12 @@ local function statText(text, m)
 			if a then
 				text = string.sub(text, 1, a - 1) .. name .. string.sub(text, b + 1)
 			end
+		end
+	end
+	if name ~= "" and #name >= 3 and #text <= 48 and string.find(text, name, 1, true) then
+		local replaced, count = string.gsub(text, "%[%s*%d[%d,]*%s*%]", "[" .. tostring(fakeLevel(m)) .. "]", 1)
+		if count > 0 then
+			text = replaced
 		end
 	end
 	if string.find(text, "Leaderboard Rank", 1, true) then
@@ -2103,23 +2243,57 @@ end
 local function rememberBar(frame)
 	if barSaved[frame] == nil then
 		local grad = frame:FindFirstChildOfClass("UIGradient")
+		local image = frame:IsA("ImageLabel") or frame:IsA("ImageButton")
 		barSaved[frame] = {
-			Color = frame:IsA("ImageLabel") and frame.ImageColor3 or frame.BackgroundColor3,
+			Color = image and frame.ImageColor3 or frame.BackgroundColor3,
 			Size = frame.Size,
+			Transparency = frame.BackgroundTransparency,
+			ImageTransparency = image and frame.ImageTransparency or nil,
 			Gradient = grad and grad.Color or nil,
 		}
 	end
 end
 
-local function paintFill(frame, ratio, color)
+local function paintFill(frame, ratio, color, hide)
 	if not frame or not frame.Parent then
 		return
 	end
 	rememberBar(frame)
+	local saved = barSaved[frame]
+	local image = frame:IsA("ImageLabel") or frame:IsA("ImageButton")
 	local yScale, yOffset = frame.Size.Y.Scale, frame.Size.Y.Offset
+	local parent = frame.Parent
+	if hide then
+		frame.Size = UDim2.new(0, 0, yScale, yOffset)
+		frame.BackgroundTransparency = 1
+		if image then
+			frame.ImageTransparency = 1
+		end
+		if parent and parent:IsA("GuiObject") then
+			local ps = parent.AbsoluteSize
+			if ps.Y >= 2 and ps.Y <= 22 and ps.X >= 16 then
+				if saved.ParentTransparency == nil then
+					saved.ParentTransparency = parent.BackgroundTransparency
+					saved.ParentImageTransparency = (parent:IsA("ImageLabel") or parent:IsA("ImageButton")) and parent.ImageTransparency or nil
+				end
+				parent.BackgroundTransparency = 1
+				if saved.ParentImageTransparency ~= nil then
+					parent.ImageTransparency = 1
+				end
+			end
+		end
+		return
+	end
+	if saved.ParentTransparency ~= nil and parent then
+		parent.BackgroundTransparency = saved.ParentTransparency
+		if saved.ParentImageTransparency ~= nil and (parent:IsA("ImageLabel") or parent:IsA("ImageButton")) then
+			parent.ImageTransparency = saved.ParentImageTransparency
+		end
+	end
 	frame.Size = UDim2.new(math.clamp(ratio, 0, 1), 0, yScale, yOffset)
-	if frame:IsA("ImageLabel") or frame:IsA("ImageButton") then
+	if image then
 		frame.ImageColor3 = color
+		frame.ImageTransparency = 0
 	else
 		frame.BackgroundColor3 = color
 		frame.BackgroundTransparency = 0
@@ -2133,10 +2307,11 @@ end
 local function reapplyBars(m)
 	local rank, shown, maxRp = rpParts(m)
 	local color = rankColor(rank)
+	local hide = maxRp <= 0
 	local ratio = maxRp > 0 and (shown / maxRp) or 0
 	for frame in pairs(barSaved) do
 		if typeof(frame) == "Instance" and frame.Parent then
-			paintFill(frame, ratio, color)
+			paintFill(frame, ratio, color, hide)
 		end
 	end
 end
@@ -2208,14 +2383,185 @@ local function styleRankBlock(anchor, m)
 				local brighter = colorSum > parentSum + 0.2
 				local shorter = size.X < psize.X - 4
 				if psize.Y >= 3 and psize.Y <= 22 and psize.X >= 40 and (brighter or shorter) then
-					paintFill(ch, ratio, color)
+					paintFill(ch, ratio, color, maxRp <= 0)
 				end
 			end
 		end
 	end
 end
 
-local function paintStatObject(obj, m)
+local otherNames = {}
+local otherStamp = 0
+local function otherPlayerText(text)
+	if type(text) ~= "string" or text == "" then
+		return false
+	end
+	if os.clock() - otherStamp > 1 then
+		table.clear(otherNames)
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= lp then
+				if #plr.Name >= 3 then
+					table.insert(otherNames, plr.Name)
+				end
+				if #plr.DisplayName >= 3 and plr.DisplayName ~= plr.Name then
+					table.insert(otherNames, plr.DisplayName)
+				end
+			end
+		end
+		otherStamp = os.clock()
+	end
+	for _, n in ipairs(otherNames) do
+		if string.find(text, n, 1, true) then
+			return true
+		end
+	end
+	return false
+end
+
+local function mineCard(obj)
+	local names = nameList()
+	local node = obj.Parent
+	for _ = 1, 8 do
+		if not node or node:IsA("ScreenGui") or node:IsA("PlayerGui") or node.Name == "Quantumware" then
+			return false
+		end
+		local count, foundMine, foundOther = 0, false, false
+		for _, ch in ipairs(node:GetDescendants()) do
+			count += 1
+		if count > 900 then
+				foundOther = true
+				break
+			end
+			if ch:IsA("TextLabel") or ch:IsA("TextButton") or ch:IsA("TextBox") then
+				local text = ch.Text
+				if type(text) == "string" and text ~= "" then
+					if textHasName(text, names) then
+						foundMine = true
+					elseif otherPlayerText(text) then
+						foundOther = true
+						break
+					end
+				end
+			end
+		end
+		if foundOther then
+			return false
+		end
+		if foundMine then
+			return true
+		end
+		if node:IsA("SurfaceGui") or node:IsA("BillboardGui") then
+			return false
+		end
+		node = node.Parent
+	end
+	return false
+end
+
+local function nearStreakIcon(obj)
+	if not levelishText(obj.Text) then
+		return false
+	end
+	local parent = obj.Parent
+	if not parent then
+		return false
+	end
+	for _, ch in ipairs(parent:GetChildren()) do
+		if ch ~= obj then
+			local n = string.lower(ch.Name)
+			if string.find(n, "streak", 1, true) or string.find(n, "flame", 1, true) then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function streakNumberNear(anchor)
+	local function pick(scope)
+		if not scope then
+			return
+		end
+		local named, nearest, nearestScore
+		for _, ch in ipairs(scope:GetChildren()) do
+			if ch ~= anchor and (ch:IsA("TextLabel") or ch:IsA("TextButton") or ch:IsA("TextBox")) and levelishText(ch.Text) then
+				if namedStreak(ch) or nameHas(ch.Name, "streak") or nameHas(ch.Name, "value") or nameHas(ch.Name, "amount") then
+					named = ch
+					break
+				end
+				local score = ch.LayoutOrder
+				if score < anchor.LayoutOrder then
+					score += 1000
+				end
+				if not nearest or score < nearestScore then
+					nearest, nearestScore = ch, score
+				end
+			end
+		end
+		return named or nearest
+	end
+	return pick(anchor.Parent) or pick(anchor.Parent and anchor.Parent.Parent)
+end
+
+local paintStatObject
+local sweeping = false
+local function watchStat(obj)
+	if statWatch[obj] then
+		return
+	end
+	statWatch[obj] = obj:GetPropertyChangedSignal("Text"):Connect(function()
+		local mod = Modules["Fake Stats"]
+		if mod and mod.enabled and statWriting ~= obj then
+			paintStatObject(obj, mod)
+		end
+	end)
+end
+
+local function writeStatText(obj, text)
+	if obj.Text ~= text then
+		if statSwapped[obj] == nil then
+			statSwapped[obj] = obj.Text
+		end
+		statWriting = obj
+		obj.Text = text
+		statWriting = nil
+	end
+	watchStat(obj)
+end
+
+local function tintLevel(obj, level)
+	local color = colorForLevel(level)
+	local saved = statColor[obj]
+	if not saved then
+		saved = {}
+		statColor[obj] = saved
+	end
+	if saved.text == nil then
+		saved.text = obj.TextColor3
+	end
+	if obj.TextColor3 ~= color then
+		obj.TextColor3 = color
+	end
+	local parent = obj.Parent
+	if parent and parent:IsA("GuiObject") and nameHas(parent.Name, "level") then
+		local size = parent.AbsoluteSize
+		if size.X <= 90 and size.Y <= 42 then
+			local parentSaved = statColor[parent]
+			if not parentSaved then
+				parentSaved = {}
+				statColor[parent] = parentSaved
+			end
+			if parentSaved.background == nil then
+				parentSaved.background = parent.BackgroundColor3
+			end
+			if parent.BackgroundColor3 ~= color then
+				parent.BackgroundColor3 = color
+			end
+		end
+	end
+end
+
+function paintStatObject(obj, m)
 	if statWriting == obj or not obj or not obj.Parent or obj:FindFirstAncestor("Quantumware") then
 		return
 	end
@@ -2248,21 +2594,54 @@ local function paintStatObject(obj, m)
 	if rankish and (nextText == rank or string.find(obj.Text, "Leaderboard Rank", 1, true) or string.find(nextText, "Leaderboard Rank", 1, true)) then
 		styleRankBlock(obj, m)
 	end
+	local level = fakeLevel(m)
+	local streak = fakeStreak(m)
+	local touchLevel = false
+	local owned = false
+	local candidate = namedStat(obj, "level") or namedStat(obj, "streak") or nearStreakIcon(obj) or streakCaption(obj.Text) or streakLine(obj.Text)
+	if candidate and mineCard(obj) then
+		owned = true
+		if namedStat(obj, "level") and levelishText(obj.Text) then
+			nextText = formatLevel(obj.Text, level)
+			touchLevel = true
+		elseif streakCaption(obj.Text) then
+			local num = streakNumberNear(obj)
+			if num then
+				writeStatText(num, tostring(streak))
+			end
+		elseif (namedStat(obj, "streak") or nearStreakIcon(obj)) and levelishText(obj.Text) then
+			nextText = tostring(streak)
+		elseif streakLine(obj.Text) then
+			local replaced, count = string.gsub(obj.Text, "%d[%d,]*", tostring(streak), 1)
+			if count > 0 then
+				nextText = replaced
+			end
+		end
+	end
 	if nextText ~= obj.Text then
-		if statSwapped[obj] == nil then
-			statSwapped[obj] = obj.Text
-		end
-		statWriting = obj
-		obj.Text = nextText
-		statWriting = nil
-		if not statWatch[obj] then
-			statWatch[obj] = obj:GetPropertyChangedSignal("Text"):Connect(function()
-				local mod = Modules["Fake Stats"]
-				if mod and mod.enabled and statWriting ~= obj then
-					paintStatObject(obj, mod)
+		writeStatText(obj, nextText)
+	elseif owned then
+		watchStat(obj)
+	end
+	if touchLevel then
+		tintLevel(obj, level)
+	end
+	local fakeName = tostring(get(m, "Name") or "")
+	if not sweeping and fakeName ~= "" and type(nextText) == "string" and string.find(nextText, fakeName, 1, true) and obj.Parent then
+		sweeping = true
+		local count = 0
+		for _, ch in ipairs(obj.Parent:GetDescendants()) do
+			count += 1
+			if count > 50 then
+				break
+			end
+			if ch ~= obj and (ch:IsA("TextLabel") or ch:IsA("TextButton") or ch:IsA("TextBox")) then
+				if namedStat(ch, "level") or namedStat(ch, "streak") or nearStreakIcon(ch) or streakCaption(ch.Text) or streakLine(ch.Text) then
+					paintStatObject(ch, m)
 				end
-			end)
+			end
 		end
+		sweeping = false
 	end
 end
 
@@ -2314,7 +2693,7 @@ local function hookGamePlayer()
 	if not class or oldUsername then
 		return
 	end
-	oldUsername, oldDisplay = class.getUsername, class.getDisplayName
+	oldUsername, oldDisplay, oldLevel = class.getUsername, class.getDisplayName, class.getLevel
 	local function playerOf(self)
 		if type(self) ~= "table" or type(self.getPlayer) ~= "function" then
 			return
@@ -2338,6 +2717,15 @@ local function hookGamePlayer()
 		end
 		return oldDisplay(self, ...)
 	end
+	if type(oldLevel) == "function" then
+		class.getLevel = function(self, ...)
+			local mod = Modules["Fake Stats"]
+			if mod and mod.enabled and playerOf(self) == lp then
+				return fakeLevel(mod)
+			end
+			return oldLevel(self, ...)
+		end
+	end
 end
 
 local function unhookGamePlayer()
@@ -2345,8 +2733,11 @@ local function unhookGamePlayer()
 	if class and oldUsername then
 		class.getUsername = oldUsername
 		class.getDisplayName = oldDisplay
+		if type(oldLevel) == "function" then
+			class.getLevel = oldLevel
+		end
 	end
-	oldUsername, oldDisplay = nil, nil
+	oldUsername, oldDisplay, oldLevel = nil, nil, nil
 end
 
 local RANK_REMOTE = {
@@ -2375,7 +2766,7 @@ local SKIP_PROFILE = {
 	favoriteKitData = true,
 }
 
-local function patchProfile(value, force, depth, rankName, rp, lb, fakeName, divId)
+local function patchProfile(value, force, depth, rankName, rp, lb, fakeName, divId, level, streak)
 	if depth > 5 or type(value) ~= "table" or value.andThen or value.expect or value.await then
 		return
 	end
@@ -2385,12 +2776,10 @@ local function patchProfile(value, force, depth, rankName, rp, lb, fakeName, div
 	end
 	local mine = force or uid == lp or tonumber(uid) == lp.UserId
 	for key, field in pairs(value) do
-		if type(key) == "number" or SKIP_PROFILE[key] then
-			continue
-		end
+		if type(key) ~= "number" and not SKIP_PROFILE[key] then
 		local lk = string.lower(tostring(key))
 		if type(field) == "table" then
-			patchProfile(field, mine, depth + 1, rankName, rp, lb, fakeName, divId)
+			patchProfile(field, mine, depth + 1, rankName, rp, lb, fakeName, divId, level, streak)
 		elseif mine then
 			if divId ~= nil and (lk == "rankdivision" or lk == "division" or lk == "rankeddivision" or lk == "currentdivision") then
 				value[key] = divId
@@ -2404,12 +2793,17 @@ local function patchProfile(value, force, depth, rankName, rp, lb, fakeName, div
 				value[key] = rp
 			elseif type(field) == "number" and (lk == "leaderboardrank" or lk == "leaderboardposition" or lk == "leaderboardplacement" or lk == "rankposition") then
 				value[key] = lb
+			elseif depth <= 3 and type(field) == "number" and (lk == "level" or lk == "playerlevel" or lk == "currentlevel" or lk == "accountlevel") then
+				value[key] = level
+			elseif depth <= 3 and type(field) == "number" and (lk == "winstreak" or lk == "globalwinstreak" or lk == "currentwinstreak" or lk == "activewinstreak") then
+				value[key] = streak
 			end
+		end
 		end
 	end
 	if type(value[1]) == "table" then
 		for _, entry in ipairs(value) do
-			patchProfile(entry, force, depth + 1, rankName, rp, lb, fakeName, divId)
+			patchProfile(entry, force, depth + 1, rankName, rp, lb, fakeName, divId, level, streak)
 		end
 	end
 end
@@ -2420,9 +2814,9 @@ local function rewriteRankResult(value, requested)
 		return
 	end
 	local rankName, rp = rpParts(mod)
-	local lb = tonumber((tostring(get(mod, "Leaderboard") or "1"):gsub(",", ""))) or 1
+	local lb = tonumber((tostring(get(mod, "Leaderboard Rank") or "1"):gsub(",", ""))) or 1
 	local fakeName = tostring(get(mod, "Name") or "")
-	patchProfile(value, requested, 0, rankName, rp, lb, fakeName, divisionIdFor(rankName))
+	patchProfile(value, requested, 0, rankName, rp, lb, fakeName, divisionIdFor(rankName), fakeLevel(mod), fakeStreak(mod))
 end
 
 local function wrapRankCall(fn, remote)
@@ -2630,12 +3024,14 @@ end, function()
 	end
 end, 0.05)
 
-add("Larping", "Fake Stats", "Name, rank, and leaderboard. Division RP is 0-100. Nightmare RP is 0-1000", function(m)
+add("Larping", "Fake Stats", "Name, level, winstreak, rank, leaderboard place, and RP. Nightmare is a plain RP number with no bar", function(m)
 	opt(m, "Name", "text", "corapses")
+	opt(m, "Level", "slider", 100, { min = 0, max = 999 })
+	opt(m, "Winstreak", "slider", 10, { min = 0, max = 999 })
 	opt(m, "Rank", "list", "Nightmare", { list = RANK_LIST })
 	opt(m, "RP", "slider", 20, { min = 0, max = 100, suffix = " RP" })
 	opt(m, "Nightmare RP", "slider", 477, { min = 0, max = 1000, suffix = " RP" })
-	opt(m, "Leaderboard", "text", "1")
+	opt(m, "Leaderboard Rank", "text", "1")
 end, function(on, m)
 	if on then
 		realNames = {}
@@ -2730,13 +3126,42 @@ end, function(on, m)
 		end
 		statWriting = nil
 		table.clear(statSwapped)
+		for obj, saved in pairs(statColor) do
+			if typeof(obj) == "Instance" and obj.Parent and type(saved) == "table" then
+				if saved.text ~= nil and (obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox")) then
+					obj.TextColor3 = saved.text
+				end
+				if saved.background ~= nil and obj:IsA("GuiObject") then
+					obj.BackgroundColor3 = saved.background
+				end
+			end
+		end
+		table.clear(statColor)
+		for attr, old in pairs(savedAttr) do
+			pcall(function()
+				lp:SetAttribute(attr, old)
+			end)
+		end
+		table.clear(savedAttr)
 		for frame, saved in pairs(barSaved) do
 			if typeof(frame) == "Instance" and frame.Parent and type(saved) == "table" then
 				frame.Size = saved.Size
 				if frame:IsA("ImageLabel") or frame:IsA("ImageButton") then
 					frame.ImageColor3 = saved.Color
+					if saved.ImageTransparency ~= nil then
+						frame.ImageTransparency = saved.ImageTransparency
+					end
 				else
 					frame.BackgroundColor3 = saved.Color
+					if saved.Transparency ~= nil then
+						frame.BackgroundTransparency = saved.Transparency
+					end
+				end
+				if saved.ParentTransparency ~= nil and frame.Parent:IsA("GuiObject") then
+					frame.Parent.BackgroundTransparency = saved.ParentTransparency
+					if saved.ParentImageTransparency ~= nil and (frame.Parent:IsA("ImageLabel") or frame.Parent:IsA("ImageButton")) then
+						frame.Parent.ImageTransparency = saved.ParentImageTransparency
+					end
 				end
 				local grad = frame:FindFirstChildOfClass("UIGradient")
 				if grad and saved.Gradient then
@@ -2768,13 +3193,169 @@ end, function(m)
 		end
 	end
 	shownName = name
+	for _, attr in ipairs({ "Level", "PlayerLevel", "WinStreak", "winStreak" }) do
+		local cur = lp:GetAttribute(attr)
+		if type(cur) == "number" then
+			if savedAttr[attr] == nil then
+				savedAttr[attr] = cur
+			end
+			local want = (attr == "Level" or attr == "PlayerLevel") and fakeLevel(m) or fakeStreak(m)
+			if cur ~= want then
+				pcall(function()
+					lp:SetAttribute(attr, want)
+				end)
+			end
+		end
+	end
 	for obj in pairs(statWatch) do
 		if typeof(obj) == "Instance" and obj.Parent then
 			paintStatObject(obj, m)
 		end
 	end
 	reapplyBars(m)
+	m.scanAcc = (m.scanAcc or 0) + 0.2
+	if m.scanAcc >= 2 then
+		m.scanAcc = 0
+		local pg = lp:FindFirstChildOfClass("PlayerGui")
+		if pg then
+			task.spawn(scanStatRoot, pg, m, false)
+		end
+	end
 end, 0.2)
+
+local signFolder, signFollow, signLabels
+local function stopSign()
+	if signFollow then
+		pcall(function()
+			RunService:UnbindFromRenderStep("QW_Sign")
+		end)
+		signFollow = false
+	end
+	if signFolder then
+		signFolder:Destroy()
+		signFolder = nil
+	end
+	signLabels = nil
+end
+
+local function makeDisc(parent, name, diameter, color, transparency)
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Shape = Enum.PartType.Cylinder
+	part.Size = Vector3.new(0.35, diameter, diameter)
+	part.Color = color
+	part.Material = Enum.Material.Neon
+	part.Transparency = transparency
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Parent = parent
+	return part
+end
+
+local function startSign(m)
+	stopSign()
+	local r = root()
+	if not r then
+		return
+	end
+	signFolder = Instance.new("Folder")
+	signFolder.Name = "QW_Sign"
+	signFolder.Parent = workspace
+	local outer = makeDisc(signFolder, "Outer", 18, Color3.fromRGB(0, 0, 0), 0.05)
+	local middle = makeDisc(signFolder, "Middle", 11, Color3.fromRGB(12, 12, 14), 0.15)
+	local inner = makeDisc(signFolder, "Inner", 5, Color3.fromRGB(0, 0, 0), 0.05)
+	local slice = Instance.new("Part")
+	slice.Name = "Slice"
+	slice.Size = Vector3.new(7, 0.4, 1.4)
+	slice.Color = Color3.fromRGB(245, 245, 245)
+	slice.Material = Enum.Material.Neon
+	slice.Anchored = true
+	slice.CanCollide = false
+	slice.CanQuery = false
+	slice.CanTouch = false
+	slice.CastShadow = false
+	slice.Parent = signFolder
+	local board = Instance.new("Part")
+	board.Name = "Sign"
+	board.Size = Vector3.new(72, 28, 0.4)
+	board.Transparency = 1
+	board.Anchored = true
+	board.CanCollide = false
+	board.CanQuery = false
+	board.CanTouch = false
+	board.CastShadow = false
+	board.Parent = signFolder
+	signLabels = {}
+	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+		local gui = Instance.new("SurfaceGui")
+		gui.Face = face
+		gui.LightInfluence = 0
+		gui.Brightness = 2
+		gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+		gui.PixelsPerStud = 18
+		gui.Parent = board
+		local text = Instance.new("TextLabel")
+		text.BackgroundTransparency = 1
+		text.Size = UDim2.fromScale(1, 1)
+		text.Font = Enum.Font.GothamBlack
+		text.TextScaled = true
+		text.TextColor3 = Color3.new(1, 1, 1)
+		text.Text = tostring(get(m, "Text") or "HI")
+		text.Parent = gui
+		local stroke = Instance.new("UIStroke")
+		stroke.Thickness = 8
+		stroke.Color = Color3.new(0, 0, 0)
+		stroke.Parent = text
+		table.insert(signLabels, text)
+	end
+	local spin = 0
+	signFollow = true
+	RunService:BindToRenderStep("QW_Sign", Enum.RenderPriority.Last.Value, function(dt)
+		local rootPart = root()
+		local mod = Modules["Black Aura"]
+		if not rootPart or not signFolder or not mod or not mod.enabled then
+			return
+		end
+		local word = tostring(get(mod, "Text") or "HI")
+		if signLabels then
+			for _, text in ipairs(signLabels) do
+				if text.Text ~= word then
+					text.Text = word
+				end
+			end
+		end
+		local height = tonumber(get(mod, "Height")) or 200
+		spin += (dt or 0.016) * 2.4
+		local base = rootPart.CFrame * CFrame.new(0, -2.6, 0)
+		local flat = CFrame.Angles(0, 0, math.rad(90))
+		outer.CFrame = base * CFrame.Angles(0, spin, 0) * flat
+		middle.CFrame = base * CFrame.Angles(0, -spin * 0.65, 0) * flat
+		inner.CFrame = base * CFrame.Angles(0, spin * 1.4, 0) * flat
+		slice.CFrame = base * CFrame.Angles(0, spin, 0) * CFrame.new(4.2, 0.25, 0)
+		local pos = rootPart.Position + Vector3.new(0, height, 0)
+		local look = cam and cam.CFrame.Position or (pos + Vector3.new(0, 0, -1))
+		board.CFrame = CFrame.lookAt(pos, Vector3.new(look.X, pos.Y, look.Z))
+	end)
+end
+
+add("Larping", "Black Aura", "Black spinning aura at your feet and a giant sign above you", function(m)
+	opt(m, "Text", "text", "HI")
+	opt(m, "Height", "slider", 200, { min = 40, max = 300, suffix = " st" })
+end, function(on, m)
+	if on then
+		startSign(m)
+	else
+		stopSign()
+	end
+end, function(m)
+	if m.enabled and not signFolder then
+		startSign(m)
+	end
+end, 0.5)
+
 add("World", "Nuker", "Fast-breaks bed defense, then the bed", function(m)
 	opt(m, "Range", "slider", 30, { min = 10, max = 40, suffix = " st" })
 	opt(m, "Delay", "slider", 80, { min = 40, max = 300, step = 10, suffix = "ms" })
@@ -2829,17 +3410,112 @@ pcall(function()
 		syn.protect_gui(screen)
 	end
 end)
-screen.Parent = parentGui()
+local attached = false
+pcall(function()
+	screen.Parent = parentGui()
+	attached = screen.Parent ~= nil
+end)
+if not attached then
+	pcall(function()
+		screen.Parent = lp:WaitForChild("PlayerGui")
+	end)
+end
 
 local overlay = Instance.new("Frame")
 overlay.Size = UDim2.fromScale(1, 1)
 overlay.BackgroundColor3 = Color3.fromRGB(6, 8, 14)
 overlay.BackgroundTransparency = 0.55
+overlay.Visible = true
+overlay.ZIndex = 1
 overlay.Parent = screen
+
+local toasts = Instance.new("Frame")
+toasts.Name = "Toasts"
+toasts.BackgroundTransparency = 1
+toasts.AnchorPoint = Vector2.new(0, 1)
+toasts.Position = UDim2.new(0, 16, 1, -16)
+toasts.Size = UDim2.fromOffset(420, 280)
+toasts.ZIndex = 40
+toasts.Active = false
+toasts.Parent = screen
+local toastList = Instance.new("UIListLayout")
+toastList.Padding = UDim.new(0, 6)
+toastList.VerticalAlignment = Enum.VerticalAlignment.Bottom
+toastList.HorizontalAlignment = Enum.HorizontalAlignment.Left
+toastList.SortOrder = Enum.SortOrder.LayoutOrder
+toastList.Parent = toasts
+
+local toastOrder = 0
+pushToast = function(name, on)
+	toastOrder += 1
+	local card = Instance.new("Frame")
+	card.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	card.BackgroundTransparency = 0.05
+	card.Size = UDim2.fromOffset(0, 0)
+	card.AutomaticSize = Enum.AutomaticSize.XY
+	card.BorderSizePixel = 0
+	card.LayoutOrder = toastOrder
+	card.ZIndex = 41
+	card.Active = false
+	card.Parent = toasts
+	corner(card, 8)
+	stroke(card, 0.78)
+	local pad = Instance.new("UIPadding")
+	pad.PaddingLeft = UDim.new(0, 12)
+	pad.PaddingRight = UDim.new(0, 12)
+	pad.PaddingTop = UDim.new(0, 7)
+	pad.PaddingBottom = UDim.new(0, 7)
+	pad.Parent = card
+	local text = Instance.new("TextLabel")
+	text.BackgroundTransparency = 1
+	text.Size = UDim2.fromOffset(0, 0)
+	text.AutomaticSize = Enum.AutomaticSize.XY
+	text.Font = Enum.Font.GothamMedium
+	text.TextSize = 14
+	text.TextColor3 = Color3.fromRGB(255, 255, 255)
+	text.RichText = true
+	text.TextXAlignment = Enum.TextXAlignment.Left
+	text.ZIndex = 42
+	text.Active = false
+	local stateColor = on and "rgb(80,220,130)" or "rgb(255,85,85)"
+	local stateWord = on and "ON" or "OFF"
+	text.Text = name .. '   <font color="' .. stateColor .. '">' .. stateWord .. "</font>"
+	text.Parent = card
+	task.delay(2, function()
+		if not card.Parent then
+			return
+		end
+		local info = TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		TweenService:Create(card, info, { BackgroundTransparency = 1 }):Play()
+		TweenService:Create(text, info, { TextTransparency = 1 }):Play()
+		local edge = card:FindFirstChildOfClass("UIStroke")
+		if edge then
+			TweenService:Create(edge, info, { Transparency = 1 }):Play()
+		end
+		task.delay(0.24, function()
+			card:Destroy()
+		end)
+	end)
+	local cards = {}
+	for _, child in ipairs(toasts:GetChildren()) do
+		if child:IsA("Frame") then
+			table.insert(cards, child)
+		end
+	end
+	table.sort(cards, function(a, b)
+		return a.LayoutOrder < b.LayoutOrder
+	end)
+	while #cards > 5 do
+		table.remove(cards, 1):Destroy()
+	end
+end
 
 local worldBlur = Instance.new("BlurEffect")
 worldBlur.Size = 10
-worldBlur.Parent = Lighting
+worldBlur.Enabled = true
+pcall(function()
+	worldBlur.Parent = Lighting
+end)
 
 local menu = Instance.new("Frame")
 menu.BackgroundTransparency = 1
@@ -3010,13 +3686,28 @@ local ACCENT = Color3.fromRGB(150, 168, 255)
 local function label(parent, text, size, color, align)
 	local l = Instance.new("TextLabel")
 	l.BackgroundTransparency = 1
+	l.Active = false
 	l.Font = Enum.Font.Gotham
 	l.TextSize = size or 12
 	l.TextColor3 = color or TXT
 	l.TextXAlignment = align or Enum.TextXAlignment.Left
 	l.Text = text
 	l.Parent = parent
+	pcall(function()
+		l.Interactable = false
+	end)
 	return l
+end
+
+local function paintSwitch(pill, knob, on)
+	pill.BackgroundColor3 = on and ACCENT or Color3.fromRGB(46, 50, 66)
+	pill.BackgroundTransparency = 0
+	pill.BorderSizePixel = 0
+	knob.AnchorPoint = Vector2.new(0, 0.5)
+	knob.Position = on and UDim2.new(1, -14, 0.5, 0) or UDim2.new(0, 2, 0.5, 0)
+	knob.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+	knob.BackgroundTransparency = 0
+	knob.BorderSizePixel = 0
 end
 
 local panel = Instance.new("Frame")
@@ -3112,21 +3803,22 @@ local function pillRow(o, order)
 	b.LayoutOrder = order
 	b.Parent = panel
 	local name = label(b, o.name, 12, TXT)
-	name.Size = UDim2.new(1, -40, 1, 0)
+	name.Size = UDim2.new(1, -44, 1, 0)
 	local pill = Instance.new("Frame")
-	pill.Size = UDim2.fromOffset(28, 14)
-	pill.Position = UDim2.new(1, -28, 0.5, -7)
+	pill.Size = UDim2.fromOffset(32, 16)
+	pill.Position = UDim2.new(1, -32, 0.5, -8)
+	pill.Active = false
+	pill.ZIndex = 2
 	pill.Parent = b
 	corner(pill, 8)
 	local knob = Instance.new("Frame")
-	knob.Size = UDim2.fromOffset(10, 10)
-	knob.BackgroundColor3 = Color3.fromRGB(240, 242, 252)
+	knob.Size = UDim2.fromOffset(12, 12)
+	knob.Active = false
+	knob.ZIndex = 3
 	knob.Parent = pill
 	corner(knob, 8)
 	local function paint()
-		pill.BackgroundColor3 = o.value and ACCENT or Color3.fromRGB(255, 255, 255)
-		pill.BackgroundTransparency = o.value and 0.1 or 0.8
-		knob.Position = o.value and UDim2.new(1, -12, 0.5, -5) or UDim2.new(0, 2, 0.5, -5)
+		paintSwitch(pill, knob, o.value)
 	end
 	b.MouseButton1Click:Connect(function()
 		o.value = not o.value
@@ -3362,42 +4054,53 @@ local function window(name, x)
 		row.Parent = list
 		corner(row, 6)
 
-		local txt = label(row, mod.name, 13, DIM)
-		txt.Size = UDim2.new(1, -44, 1, 0)
+		local thisMod = mod
+		local txt = label(row, thisMod.name, 13, DIM)
+		txt.Size = UDim2.new(1, -48, 1, 0)
 		txt.Position = UDim2.fromOffset(6, 0)
+		txt.ZIndex = 2
 
 		local pill = Instance.new("Frame")
-		pill.Size = UDim2.fromOffset(28, 14)
-		pill.Position = UDim2.new(1, -30, 0.5, -7)
+		pill.Size = UDim2.fromOffset(32, 16)
+		pill.Position = UDim2.new(1, -36, 0.5, -8)
+		pill.Active = false
+		pill.ZIndex = 3
 		pill.Parent = row
 		corner(pill, 8)
 		local knob = Instance.new("Frame")
-		knob.Size = UDim2.fromOffset(10, 10)
-		knob.BackgroundColor3 = Color3.fromRGB(240, 242, 252)
+		knob.Size = UDim2.fromOffset(12, 12)
+		knob.Active = false
+		knob.ZIndex = 4
 		knob.Parent = pill
 		corner(knob, 8)
 
-		mod.paint = function()
-			txt.TextColor3 = mod.enabled and Color3.fromRGB(255, 255, 255) or DIM
-			pill.BackgroundColor3 = mod.enabled and ACCENT or Color3.fromRGB(255, 255, 255)
-			pill.BackgroundTransparency = mod.enabled and 0.1 or 0.8
-			knob.Position = mod.enabled and UDim2.new(1, -12, 0.5, -5) or UDim2.new(0, 2, 0.5, -5)
+		thisMod.paint = function()
+			txt.TextColor3 = thisMod.enabled and Color3.fromRGB(255, 255, 255) or DIM
+			paintSwitch(pill, knob, thisMod.enabled)
 		end
-		mod.paint()
+		thisMod.paint()
 
-		row.MouseEnter:Connect(function()
+		local hit = Instance.new("TextButton")
+		hit.Name = "Hit"
+		hit.Text = ""
+		hit.AutoButtonColor = false
+		hit.BackgroundTransparency = 1
+		hit.Size = UDim2.fromScale(1, 1)
+		hit.ZIndex = 6
+		hit.Parent = row
+		hit.MouseEnter:Connect(function()
 			row.BackgroundTransparency = 0.93
 			hint.Text = "Right-click for settings"
 		end)
-		row.MouseLeave:Connect(function()
+		hit.MouseLeave:Connect(function()
 			row.BackgroundTransparency = 1
 			hint.Text = "Right Shift"
 		end)
-		row.MouseButton1Click:Connect(function()
-			setOn(mod, not mod.enabled)
+		hit.MouseButton1Click:Connect(function()
+			setOn(thisMod, not thisMod.enabled)
 		end)
-		row.MouseButton2Click:Connect(function()
-			openPanel(mod, row)
+		hit.MouseButton2Click:Connect(function()
+			openPanel(thisMod, row)
 		end)
 	end
 
@@ -3430,6 +4133,18 @@ UserInputService.InputBegan:Connect(function(i, g)
 	if i.UserInputType ~= Enum.UserInputType.Keyboard then
 		return
 	end
+	if i.KeyCode == Enum.KeyCode.RightShift then
+		local show = not overlay.Visible
+		overlay.Visible = show
+		pcall(function()
+			worldBlur.Enabled = show
+		end)
+		menuOpen = show
+		if not show then
+			closePanel()
+		end
+		return
+	end
 	if binding then
 		local o = binding
 		binding = nil
@@ -3444,16 +4159,6 @@ UserInputService.InputBegan:Connect(function(i, g)
 		return
 	end
 	if g then
-		return
-	end
-	if i.KeyCode == Enum.KeyCode.RightShift then
-		local show = not overlay.Visible
-		overlay.Visible = show
-		worldBlur.Enabled = show
-		menuOpen = show
-		if not show then
-			closePanel()
-		end
 		return
 	end
 	for _, m in pairs(Modules) do
@@ -3491,7 +4196,7 @@ RunService.Heartbeat:Connect(function(dt)
 		end
 	end
 	local ti = Modules.TargetInfo
-	if ti.enabled then
+	if ti and ti.enabled then
 		local t, r = pick(get(ti, "Range"))
 		targetHud.Visible = t ~= nil
 		if t and r then
