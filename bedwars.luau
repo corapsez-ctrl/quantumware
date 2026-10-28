@@ -2385,9 +2385,7 @@ local function patchProfile(value, force, depth, rankName, rp, lb, fakeName, div
 	end
 	local mine = force or uid == lp or tonumber(uid) == lp.UserId
 	for key, field in pairs(value) do
-		if type(key) == "number" or SKIP_PROFILE[key] then
-			continue
-		end
+		if type(key) ~= "number" and not SKIP_PROFILE[key] then
 		local lk = string.lower(tostring(key))
 		if type(field) == "table" then
 			patchProfile(field, mine, depth + 1, rankName, rp, lb, fakeName, divId)
@@ -2405,6 +2403,7 @@ local function patchProfile(value, force, depth, rankName, rp, lb, fakeName, div
 			elseif type(field) == "number" and (lk == "leaderboardrank" or lk == "leaderboardposition" or lk == "leaderboardplacement" or lk == "rankposition") then
 				value[key] = lb
 			end
+		end
 		end
 	end
 	if type(value[1]) == "table" then
@@ -2963,17 +2962,30 @@ pcall(function()
 		syn.protect_gui(screen)
 	end
 end)
-screen.Parent = parentGui()
+local attached = false
+pcall(function()
+	screen.Parent = parentGui()
+	attached = screen.Parent ~= nil
+end)
+if not attached then
+	pcall(function()
+		screen.Parent = lp:WaitForChild("PlayerGui")
+	end)
+end
 
 local overlay = Instance.new("Frame")
 overlay.Size = UDim2.fromScale(1, 1)
 overlay.BackgroundColor3 = Color3.fromRGB(6, 8, 14)
 overlay.BackgroundTransparency = 0.55
+overlay.Visible = true
 overlay.Parent = screen
 
 local worldBlur = Instance.new("BlurEffect")
 worldBlur.Size = 10
-worldBlur.Parent = Lighting
+worldBlur.Enabled = true
+pcall(function()
+	worldBlur.Parent = Lighting
+end)
 
 local menu = Instance.new("Frame")
 menu.BackgroundTransparency = 1
@@ -3564,6 +3576,18 @@ UserInputService.InputBegan:Connect(function(i, g)
 	if i.UserInputType ~= Enum.UserInputType.Keyboard then
 		return
 	end
+	if i.KeyCode == Enum.KeyCode.RightShift then
+		local show = not overlay.Visible
+		overlay.Visible = show
+		pcall(function()
+			worldBlur.Enabled = show
+		end)
+		menuOpen = show
+		if not show then
+			closePanel()
+		end
+		return
+	end
 	if binding then
 		local o = binding
 		binding = nil
@@ -3578,16 +3602,6 @@ UserInputService.InputBegan:Connect(function(i, g)
 		return
 	end
 	if g then
-		return
-	end
-	if i.KeyCode == Enum.KeyCode.RightShift then
-		local show = not overlay.Visible
-		overlay.Visible = show
-		worldBlur.Enabled = show
-		menuOpen = show
-		if not show then
-			closePanel()
-		end
 		return
 	end
 	for _, m in pairs(Modules) do
@@ -3625,7 +3639,7 @@ RunService.Heartbeat:Connect(function(dt)
 		end
 	end
 	local ti = Modules.TargetInfo
-	if ti.enabled then
+	if ti and ti.enabled then
 		local t, r = pick(get(ti, "Range"))
 		targetHud.Visible = t ~= nil
 		if t and r then
