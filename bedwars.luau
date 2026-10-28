@@ -31,13 +31,24 @@ local function parentGui()
 	if ok and typeof(hui) == "Instance" then
 		return hui
 	end
-	local ok2, core = pcall(function()
-		return game:GetService("CoreGui")
-	end)
-	if ok2 then
-		return core
+	local pg = lp and (lp:FindFirstChildOfClass("PlayerGui") or lp:FindFirstChild("PlayerGui"))
+	if pg then
+		return pg
 	end
-	return lp:WaitForChild("PlayerGui")
+	if lp then
+		local waited = lp:WaitForChild("PlayerGui", 5)
+		if waited then
+			return waited
+		end
+	end
+	if syn and syn.protect_gui then
+		local ok2, core = pcall(function()
+			return game:GetService("CoreGui")
+		end)
+		if ok2 then
+			return core
+		end
+	end
 end
 
 local function notify(text)
@@ -51,6 +62,40 @@ local function notify(text)
 	print("[Quantumware] " .. text)
 end
 
+local bootLabel
+pcall(function()
+	local host
+	local ok, hui = pcall(gethui)
+	if ok and typeof(hui) == "Instance" then
+		host = hui
+	end
+	if not host and lp then
+		host = lp:FindFirstChildOfClass("PlayerGui") or lp:FindFirstChild("PlayerGui")
+	end
+	if not host then
+		host = game:GetService("CoreGui")
+	end
+	local g = Instance.new("ScreenGui")
+	g.Name = "QuantumwareBoot"
+	g.ResetOnSpawn = false
+	g.IgnoreGuiInset = true
+	g.DisplayOrder = 999999
+	g.Parent = host
+	local t = Instance.new("TextLabel")
+	t.Name = "Text"
+	t.BackgroundColor3 = Color3.new(0, 0, 0)
+	t.BackgroundTransparency = 0.15
+	t.TextColor3 = Color3.new(1, 1, 1)
+	t.Font = Enum.Font.GothamMedium
+	t.TextSize = 14
+	t.Size = UDim2.fromOffset(260, 28)
+	t.Position = UDim2.new(0, 16, 1, -48)
+	t.Text = "Quantumware loading"
+	t.Parent = g
+	bootLabel = g
+end)
+
+local function boot()
 local function click(btn)
 	btn = btn or 0
 	pcall(function()
@@ -1172,16 +1217,16 @@ local function flyStep(speed, vspeed)
 	local side = Vector3.new(right.X, 0, right.Z)
 	local m = Vector3.zero
 	if UserInputService:IsKeyDown(Enum.KeyCode.W) then
-		m += flat
+		m = m + flat
 	end
 	if UserInputService:IsKeyDown(Enum.KeyCode.S) then
-		m -= flat
+		m = m - flat
 	end
 	if UserInputService:IsKeyDown(Enum.KeyCode.D) then
-		m += side
+		m = m + side
 	end
 	if UserInputService:IsKeyDown(Enum.KeyCode.A) then
-		m -= side
+		m = m - side
 	end
 	local v = m.Magnitude > 0 and m.Unit * speed or Vector3.zero
 	local y = 0
@@ -2217,7 +2262,7 @@ local function cardIsMine(obj)
 			local count, hit = 0, false
 			local cap = (node:IsA("SurfaceGui") or node:IsA("BillboardGui")) and 900 or 280
 			for _, ch in ipairs(node:GetDescendants()) do
-				count += 1
+				count = count + 1
 				if count > cap then
 					break
 				end
@@ -2331,7 +2376,7 @@ local function styleRankBlock(anchor, m)
 		end
 		local count, hasRp = 0, false
 		for _, ch in ipairs(node:GetDescendants()) do
-			count += 1
+			count = count + 1
 			if count > 140 then
 				break
 			end
@@ -2427,7 +2472,7 @@ local function mineCard(obj)
 		end
 		local count, foundMine, foundOther = 0, false, false
 		for _, ch in ipairs(node:GetDescendants()) do
-			count += 1
+			count = count + 1
 		if count > 900 then
 				foundOther = true
 				break
@@ -2491,7 +2536,7 @@ local function streakNumberNear(anchor)
 				end
 				local score = ch.LayoutOrder
 				if score < anchor.LayoutOrder then
-					score += 1000
+					score = score + 1000
 				end
 				if not nearest or score < nearestScore then
 					nearest, nearestScore = ch, score
@@ -2561,7 +2606,7 @@ local function tintLevel(obj, level)
 	end
 end
 
-function paintStatObject(obj, m)
+paintStatObject = function(obj, m)
 	if statWriting == obj or not obj or not obj.Parent or obj:FindFirstAncestor("Quantumware") then
 		return
 	end
@@ -2631,7 +2676,7 @@ function paintStatObject(obj, m)
 		sweeping = true
 		local count = 0
 		for _, ch in ipairs(obj.Parent:GetDescendants()) do
-			count += 1
+			count = count + 1
 			if count > 50 then
 				break
 			end
@@ -3328,7 +3373,7 @@ local function startSign(m)
 			end
 		end
 		local height = tonumber(get(mod, "Height")) or 200
-		spin += (dt or 0.016) * 2.4
+		spin = spin + (dt or 0.016) * 2.4
 		local base = rootPart.CFrame * CFrame.new(0, -2.6, 0)
 		local flat = CFrame.Angles(0, 0, math.rad(90))
 		outer.CFrame = base * CFrame.Angles(0, spin, 0) * flat
@@ -3403,8 +3448,9 @@ local screen = Instance.new("ScreenGui")
 screen.Name = "Quantumware"
 screen.ResetOnSpawn = false
 screen.IgnoreGuiInset = true
-screen.DisplayOrder = 1e6
+screen.DisplayOrder = 999999
 screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screen.Enabled = true
 pcall(function()
 	if syn and syn.protect_gui then
 		syn.protect_gui(screen)
@@ -3415,9 +3461,10 @@ pcall(function()
 	screen.Parent = parentGui()
 	attached = screen.Parent ~= nil
 end)
-if not attached then
+if not attached and lp then
 	pcall(function()
-		screen.Parent = lp:WaitForChild("PlayerGui")
+		screen.Parent = lp:WaitForChild("PlayerGui", 5)
+		attached = screen.Parent ~= nil
 	end)
 end
 
@@ -3447,7 +3494,7 @@ toastList.Parent = toasts
 
 local toastOrder = 0
 pushToast = function(name, on)
-	toastOrder += 1
+	toastOrder = toastOrder + 1
 	local card = Instance.new("Frame")
 	card.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
 	card.BackgroundTransparency = 0.05
@@ -4183,7 +4230,7 @@ RunService.Heartbeat:Connect(function(dt)
 	for _, m in pairs(Modules) do
 		if m.enabled and m.tick then
 			m.iv = m.iv or intervalOf(m)
-			m.acc += dt
+			m.acc = m.acc + dt
 			if m.iv <= 0 or m.acc >= m.iv then
 				m.acc = 0
 				m.iv = nil
@@ -4215,3 +4262,24 @@ end)
 
 refreshHud()
 notify("Loaded. Right Shift opens the menu, right-click a module for settings.")
+if bootLabel then
+	bootLabel:Destroy()
+	bootLabel = nil
+end
+end
+
+local okBoot, errBoot = xpcall(boot, function(err)
+	return tostring(err)
+end)
+if not okBoot then
+	warn("[Quantumware] " .. tostring(errBoot))
+	notify(tostring(errBoot))
+	pcall(function()
+		local t = bootLabel and bootLabel:FindFirstChild("Text")
+		if t then
+			t.Text = "Quantumware error: " .. tostring(errBoot)
+			t.TextWrapped = true
+			t.Size = UDim2.fromOffset(480, 64)
+		end
+	end)
+end
