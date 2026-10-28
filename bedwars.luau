@@ -3444,6 +3444,7 @@ local function stroke(p, a)
 	s.Parent = p
 end
 
+local function buildGui()
 local screen = Instance.new("ScreenGui")
 screen.Name = "Quantumware"
 screen.ResetOnSpawn = false
@@ -4262,6 +4263,9 @@ end)
 
 refreshHud()
 notify("Loaded. Right Shift opens the menu, right-click a module for settings.")
+end
+
+buildGui()
 if bootLabel then
 	bootLabel:Destroy()
 	bootLabel = nil
