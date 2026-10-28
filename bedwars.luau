@@ -2775,6 +2775,140 @@ end, function(m)
 	end
 	reapplyBars(m)
 end, 0.2)
+
+local signFolder, signFollow, signLabels
+local function stopSign()
+	if signFollow then
+		pcall(function()
+			RunService:UnbindFromRenderStep("QW_Sign")
+		end)
+		signFollow = false
+	end
+	if signFolder then
+		signFolder:Destroy()
+		signFolder = nil
+	end
+	signLabels = nil
+end
+
+local function makeDisc(parent, name, diameter, color, transparency)
+	local part = Instance.new("Part")
+	part.Name = name
+	part.Shape = Enum.PartType.Cylinder
+	part.Size = Vector3.new(0.35, diameter, diameter)
+	part.Color = color
+	part.Material = Enum.Material.Neon
+	part.Transparency = transparency
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CanTouch = false
+	part.CastShadow = false
+	part.Parent = parent
+	return part
+end
+
+local function startSign(m)
+	stopSign()
+	local r = root()
+	if not r then
+		return
+	end
+	signFolder = Instance.new("Folder")
+	signFolder.Name = "QW_Sign"
+	signFolder.Parent = workspace
+	local outer = makeDisc(signFolder, "Outer", 18, Color3.fromRGB(0, 0, 0), 0.05)
+	local middle = makeDisc(signFolder, "Middle", 11, Color3.fromRGB(12, 12, 14), 0.15)
+	local inner = makeDisc(signFolder, "Inner", 5, Color3.fromRGB(0, 0, 0), 0.05)
+	local slice = Instance.new("Part")
+	slice.Name = "Slice"
+	slice.Size = Vector3.new(7, 0.4, 1.4)
+	slice.Color = Color3.fromRGB(245, 245, 245)
+	slice.Material = Enum.Material.Neon
+	slice.Anchored = true
+	slice.CanCollide = false
+	slice.CanQuery = false
+	slice.CanTouch = false
+	slice.CastShadow = false
+	slice.Parent = signFolder
+	local board = Instance.new("Part")
+	board.Name = "Sign"
+	board.Size = Vector3.new(72, 28, 0.4)
+	board.Transparency = 1
+	board.Anchored = true
+	board.CanCollide = false
+	board.CanQuery = false
+	board.CanTouch = false
+	board.CastShadow = false
+	board.Parent = signFolder
+	signLabels = {}
+	for _, face in ipairs({ Enum.NormalId.Front, Enum.NormalId.Back }) do
+		local gui = Instance.new("SurfaceGui")
+		gui.Face = face
+		gui.LightInfluence = 0
+		gui.Brightness = 2
+		gui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+		gui.PixelsPerStud = 18
+		gui.Parent = board
+		local text = Instance.new("TextLabel")
+		text.BackgroundTransparency = 1
+		text.Size = UDim2.fromScale(1, 1)
+		text.Font = Enum.Font.GothamBlack
+		text.TextScaled = true
+		text.TextColor3 = Color3.new(1, 1, 1)
+		text.Text = tostring(get(m, "Text") or "HI")
+		text.Parent = gui
+		local stroke = Instance.new("UIStroke")
+		stroke.Thickness = 8
+		stroke.Color = Color3.new(0, 0, 0)
+		stroke.Parent = text
+		table.insert(signLabels, text)
+	end
+	local spin = 0
+	signFollow = true
+	RunService:BindToRenderStep("QW_Sign", Enum.RenderPriority.Last.Value, function(dt)
+		local rootPart = root()
+		local mod = Modules["Black Aura"]
+		if not rootPart or not signFolder or not mod or not mod.enabled then
+			return
+		end
+		local word = tostring(get(mod, "Text") or "HI")
+		if signLabels then
+			for _, text in ipairs(signLabels) do
+				if text.Text ~= word then
+					text.Text = word
+				end
+			end
+		end
+		local height = tonumber(get(mod, "Height")) or 200
+		spin += (dt or 0.016) * 2.4
+		local base = rootPart.CFrame * CFrame.new(0, -2.6, 0)
+		local flat = CFrame.Angles(0, 0, math.rad(90))
+		outer.CFrame = base * CFrame.Angles(0, spin, 0) * flat
+		middle.CFrame = base * CFrame.Angles(0, -spin * 0.65, 0) * flat
+		inner.CFrame = base * CFrame.Angles(0, spin * 1.4, 0) * flat
+		slice.CFrame = base * CFrame.Angles(0, spin, 0) * CFrame.new(4.2, 0.25, 0)
+		local pos = rootPart.Position + Vector3.new(0, height, 0)
+		local look = cam and cam.CFrame.Position or (pos + Vector3.new(0, 0, -1))
+		board.CFrame = CFrame.lookAt(pos, Vector3.new(look.X, pos.Y, look.Z))
+	end)
+end
+
+add("Larping", "Black Aura", "Black spinning aura at your feet and a giant sign above you", function(m)
+	opt(m, "Text", "text", "HI")
+	opt(m, "Height", "slider", 200, { min = 40, max = 300, suffix = " st" })
+end, function(on, m)
+	if on then
+		startSign(m)
+	else
+		stopSign()
+	end
+end, function(m)
+	if m.enabled and not signFolder then
+		startSign(m)
+	end
+end, 0.5)
+
 add("World", "Nuker", "Fast-breaks bed defense, then the bed", function(m)
 	opt(m, "Range", "slider", 30, { min = 10, max = 40, suffix = " st" })
 	opt(m, "Delay", "slider", 80, { min = 40, max = 300, step = 10, suffix = "ms" })
