@@ -1756,7 +1756,8 @@ local function rpParts(m)
 	local rank = tostring(get(m, "Rank") or "Nightmare")
 	if tierOf(rank) == "Nightmare" then
 		local raw = math.clamp(math.floor(tonumber(get(m, "Nightmare RP")) or tonumber(get(m, "RP")) or 0), 0, 1000)
-		return rank, raw, 0, string.format("%d RP", raw)
+		-- Full rank strip plus a plain "N RP" line, same layout as the real Nightmare card.
+		return rank, raw, math.max(raw, 1), string.format("%d RP", raw)
 	end
 	local shown = math.clamp(math.floor(tonumber(get(m, "RP")) or 0), 0, 100)
 	return rank, shown, 100, string.format("%d RP / 100", shown)
@@ -3069,7 +3070,7 @@ end, function()
 	end
 end, 0.05)
 
-add("Larping", "Fake Stats", "Name, level, winstreak, rank, leaderboard place, and RP. Nightmare is a plain RP number with no bar", function(m)
+add("Larping", "Fake Stats", "Name, level, winstreak, rank, leaderboard place, and RP. Nightmare keeps the normal rank bar and a plain RP number", function(m)
 	opt(m, "Name", "text", "corapses")
 	opt(m, "Level", "slider", 100, { min = 0, max = 999 })
 	opt(m, "Winstreak", "slider", 10, { min = 0, max = 999 })
